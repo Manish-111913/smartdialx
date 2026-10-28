@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+
+# Python build / cache files
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# SQLite databases created at runtime
+*.db
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
