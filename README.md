@@ -13,6 +13,9 @@ there's no speech recognition or real voice bot. See [docs/screening.md](docs/sc
 All telephony is mocked. No real numbers are dialed and no credentials are needed.
 Borrowers are synthetic (`+1-555-...` numbers).
 
+There's also a Next.js + Tailwind frontend in `frontend/` with the eight console
+screens (mock data, not wired to the backend yet). See [frontend/README.md](frontend/README.md).
+
 ## What's in here
 
 ```
@@ -26,6 +29,7 @@ smartdialx/
     results.md                 simulation and load test output with notes
     screening.md               screening bot -> agent transfer, and how it differs from predictive
     final-answer.md            answer to the assignment's final question
+  frontend/                    Next.js + Tailwind console (8 screens, mock data)
   backend/
     pyproject.toml
     src/smartdialx/
