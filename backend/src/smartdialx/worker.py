@@ -55,12 +55,14 @@ class Dialer:
         self.allocator = CallAllocator(repo, providers, worker_id)
         self.screening = ScreeningService(repo, providers, self.safety)
 
-    def tick(self, campaign_id: int) -> TickResult:
+    def tick(self, campaign_id: int, transfers: bool = True) -> TickResult:
+        """One pacing round for a campaign. `transfers=False` skips the hold queue, for
+        callers that run `self.screening.run()` once for all campaigns themselves."""
         campaign = self.repo.get_campaign(campaign_id)
-        transfers = None
-        if campaign.screening:
+        report = None
+        if campaign.screening and transfers:
             # people already on hold get agents before we start new bot calls
-            transfers = self.screening.run()
+            report = self.screening.run()
         snap = take_snapshot(self.repo.db, self.repo.clock, self.settings, campaign_id)
         pacers = self.screening_pacers if campaign.screening else self.pacers
         request = pacers[campaign.mode].decide(snap)
@@ -70,7 +72,7 @@ class Dialer:
             allocation = self.allocator.execute(decision, campaign)
         if request.requested or decision.approved or decision.reasons:
             self._record(campaign_id, decision, allocation)
-        return TickResult(request, decision, allocation, transfers)
+        return TickResult(request, decision, allocation, report)
 
     def _record(self, campaign_id: int, d: SafetyDecision, a: AllocationResult) -> None:
         with self.repo.db.transaction() as conn:

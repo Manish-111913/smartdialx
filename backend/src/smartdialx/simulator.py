@@ -48,6 +48,9 @@ class Scenario:
     unavailable_rate: float = 0.0
     screen_fail_rate: float = 0.0
     hold_s: float = 20.0
+    no_agent_policy: str = "callback"
+    # extra ProviderProfile fields, e.g. slower ring times to simulate a laggy provider
+    provider_overrides: dict = field(default_factory=dict)
     seed: int = 7
     tick_s: float = 1.0
     recovery_every_s: float = 10.0
@@ -88,7 +91,7 @@ def run(scenario: Scenario, settings: Settings | None = None) -> SimReport:
     settings = dataclasses.replace(
         base,
         timeouts=dataclasses.replace(base.timeouts, wrap_up_s=scenario.wrap_up_s),
-        screening=dataclasses.replace(base.screening, hold_s=scenario.hold_s),
+        screening=dataclasses.replace(base.screening, hold_s=scenario.hold_s, no_agent_policy=scenario.no_agent_policy),
     )
     settings.validate()
 
@@ -103,7 +106,7 @@ def run(scenario: Scenario, settings: Settings | None = None) -> SimReport:
     provider = make_provider(
         scenario.provider, clock, seed=scenario.seed, answer_rate=scenario.answer_rate, talk_s=scenario.talk_s,
         willing_rate=scenario.willing_rate, unavailable_rate=scenario.unavailable_rate,
-        screen_fail_rate=scenario.screen_fail_rate,
+        screen_fail_rate=scenario.screen_fail_rate, **scenario.provider_overrides,
     )
     providers = {provider.name: provider}
     events = EventProcessor(repo, providers)

@@ -21,7 +21,14 @@ CREATE TABLE IF NOT EXISTS campaigns (
     status        TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'PAUSED', 'STOPPED')),
     max_attempts  INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
     screening     INTEGER NOT NULL DEFAULT 0,
-    created_at    REAL NOT NULL
+    description   TEXT,
+    -- mock audience for the console (see console.AUDIENCES); NULL = provider defaults
+    audience      TEXT,
+    -- per-campaign overrides of ScreeningSettings; NULL = use the global setting
+    hold_s        REAL,
+    no_agent_policy TEXT CHECK (no_agent_policy IN ('callback', 'end')),
+    created_at    REAL NOT NULL,
+    updated_at    REAL
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -31,6 +38,8 @@ CREATE TABLE IF NOT EXISTS agents (
                      ('OFFLINE', 'AVAILABLE', 'RESERVED', 'DIALING', 'CONNECTED', 'WRAP_UP', 'PAUSED')),
     current_call_id  INTEGER,
     wrap_up_until    REAL,
+    -- operator asked for a pause; applied once the agent is off its current call
+    pause_requested  INTEGER NOT NULL DEFAULT 0,
     version          INTEGER NOT NULL DEFAULT 0,
     updated_at       REAL NOT NULL
 );
@@ -89,6 +98,9 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX IF NOT EXISTS calls_queue ON calls(campaign_id, state, not_before, id);
 CREATE INDEX IF NOT EXISTS calls_ring ON calls(campaign_id, ring_result_at);
 CREATE INDEX IF NOT EXISTS calls_answered ON calls(campaign_id, answered_at);
+CREATE INDEX IF NOT EXISTS calls_started ON calls(sending_at);
+CREATE INDEX IF NOT EXISTS calls_connected ON calls(connected_at);
+CREATE INDEX IF NOT EXISTS calls_ended ON calls(ended_at);
 
 -- the database itself refuses a second live call for the same borrower or agent
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_call_per_borrower ON calls(borrower_id)
@@ -116,6 +128,8 @@ CREATE TABLE IF NOT EXISTS provider_events (
     note              TEXT
 );
 CREATE INDEX IF NOT EXISTS events_pending ON provider_events(received_at) WHERE processed_at IS NULL;
+CREATE INDEX IF NOT EXISTS events_received ON provider_events(received_at);
+CREATE INDEX IF NOT EXISTS events_by_call ON provider_events(call_id);
 
 CREATE TABLE IF NOT EXISTS provider_requests (
     id          INTEGER PRIMARY KEY,
@@ -142,6 +156,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     safety_reasons  TEXT,
     inputs          TEXT
 );
+CREATE INDEX IF NOT EXISTS decisions_by_time ON decisions(at);
+CREATE INDEX IF NOT EXISTS decisions_by_campaign ON decisions(campaign_id, id);
 
 CREATE TABLE IF NOT EXISTS recovery_log (
     id        INTEGER PRIMARY KEY,
@@ -150,6 +166,29 @@ CREATE TABLE IF NOT EXISTS recovery_log (
     agent_id  INTEGER,
     action    TEXT NOT NULL,
     detail    TEXT
+);
+CREATE INDEX IF NOT EXISTS recovery_by_time ON recovery_log(at);
+
+-- operator actions from the console (pause a campaign, inject a fault, ...)
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       INTEGER PRIMARY KEY,
+    at       REAL NOT NULL,
+    action   TEXT NOT NULL,
+    subject  TEXT,
+    detail   TEXT
+);
+
+-- agent state counts sampled by the console every few seconds; utilization and the
+-- availability history are computed from these
+CREATE TABLE IF NOT EXISTS agent_samples (
+    at         REAL PRIMARY KEY,
+    available  INTEGER NOT NULL,
+    reserved   INTEGER NOT NULL,
+    dialing    INTEGER NOT NULL,
+    connected  INTEGER NOT NULL,
+    wrap_up    INTEGER NOT NULL,
+    paused     INTEGER NOT NULL,
+    offline    INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS workers (

@@ -119,6 +119,10 @@ class MockProvider:
         self.clock = clock
         self.answer_rate = profile.answer_rate
         self.outage: str | None = None  # None, "down" or "timeout"
+        # optional per-request audience: returns overrides for answer_rate, willing_rate,
+        # unavailable_rate, screen_fail_rate, talk_s (the console uses it so campaigns
+        # can call different kinds of people through the same provider)
+        self.audience: Callable[[DialRequest], dict | None] | None = None
         self._rng = random.Random(seed)
         self._sleep = sleep
         self._lock = threading.Lock()
@@ -262,6 +266,7 @@ class MockProvider:
         p = self.profile
         rng = self._rng
         now = self.clock.now()
+        aud = (self.audience(req) if self.audience else None) or {}
         pcid = f"{self.name}-{next(self._ids)}"
         call = _MockCall(pcid, req.token, screening=req.screening)
         self._calls[pcid] = call
@@ -276,16 +281,17 @@ class MockProvider:
             self._schedule(call, EventType.BUSY, ring_at, reason="busy")
         else:
             self._schedule(call, EventType.RINGING, ring_at)
-            if rng.random() < self.answer_rate:
+            if rng.random() < aud.get("answer_rate", self.answer_rate):
                 answer_at = ring_at + rng.uniform(*p.answer_after_s)
                 call.answered_at = answer_at
                 if req.screening:
                     self._schedule(call, EventType.ANSWERED, answer_at)
-                    self._screen(call, answer_at)
+                    self._screen(call, answer_at, aud)
                 else:
                     # draw order matters for reproducibility: talk time before scheduling
-                    brief = p.willing_rate < 1 and rng.random() >= p.willing_rate
-                    base = p.brief_talk_s if brief else p.talk_s
+                    willing = aud.get("willing_rate", p.willing_rate)
+                    brief = willing < 1 and rng.random() >= willing
+                    base = p.brief_talk_s if brief else aud.get("talk_s", p.talk_s)
                     talk = rng.uniform(0.5 * base, 1.5 * base)
                     self._schedule(call, EventType.ANSWERED, answer_at)
                     self._schedule(call, EventType.COMPLETED, answer_at + talk, talk=talk,
@@ -294,27 +300,29 @@ class MockProvider:
                 self._schedule(call, EventType.NO_ANSWER, ring_at + p.no_answer_after_s, reason="no_answer")
         return pcid
 
-    def _screen(self, call: _MockCall, answer_at: float) -> None:
+    def _screen(self, call: _MockCall, answer_at: float, aud: dict) -> None:
         """Mock bot conversation: pick an outcome and schedule what the bot would report.
 
         No speech recognition here, just weighted random outcomes from the profile.
         """
         p = self.profile
         rng = self._rng
+        failing = aud.get("screen_fail_rate", p.screen_fail_rate)
+        willing = aud.get("willing_rate", p.willing_rate)
         done = answer_at + rng.uniform(*p.bot_s)
         roll = rng.random()
-        if roll < p.screen_fail_rate:
+        if roll < failing:
             self._schedule(call, EventType.FAILED, done, talk=done - answer_at, reason="screen_failed")
             return
-        roll -= p.screen_fail_rate
-        if roll < p.willing_rate:
+        roll -= failing
+        if roll < willing:
             call.holding_from = done
             self._schedule(call, EventType.SCREEN_RESULT, done, reason="willing")
             give_up = done + p.hold_patience_s
             self._schedule(call, EventType.COMPLETED, give_up, talk=give_up - answer_at, reason="caller_hung_up")
             return
-        roll -= p.willing_rate
-        result = "unavailable" if roll < p.unavailable_rate else "declined"
+        roll -= willing
+        result = "unavailable" if roll < aud.get("unavailable_rate", p.unavailable_rate) else "declined"
         self._schedule(call, EventType.SCREEN_RESULT, done, reason=result)
         self._schedule(call, EventType.COMPLETED, done + 3, talk=done + 3 - answer_at, reason="bot_ended")
 

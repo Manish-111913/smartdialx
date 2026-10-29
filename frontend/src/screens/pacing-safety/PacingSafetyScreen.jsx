@@ -1,680 +1,714 @@
 "use client";
 
-import { useScreen } from "@/lib/useScreen";
-import { mount } from "./behavior";
+import { useSearchParams } from "next/navigation";
+import { useState } from "react";
+import { patch, post, put, qs, useApi } from "@/lib/api";
+import { clock, num, pct, rangeLabel } from "@/lib/format";
+import { campaignStatus, decision, humanize, reason, safetyStatus, TONE } from "@/lib/labels";
+import { useFilters } from "@/components/Filters";
+import { Badge, ConfirmDialog, EmptyState, ErrorNote, Skeleton, useAction, useToast } from "@/components/ui";
+import DecisionDrawer from "./DecisionDrawer";
+import { buildPatch, FIELDS, formatLimit, LIMIT_UNIT, MARGINS, settingValue, toInput } from "./fields";
+import SensitivityChart from "./SensitivityChart";
+
+const PAGE = 8;
+const TABS = ["APPROVE", "REDUCE", "REJECT", "FORCE_PROGRESSIVE"];
+const THRESHOLD_STATUS = {
+  ok: { label: "Within limit", tone: "green" },
+  near: { label: "Near limit", tone: "amber" },
+  over: { label: "Over limit", tone: "red" },
+  off: { label: "No limit set", tone: "gray" },
+  no_data: { label: "Not enough data", tone: "gray" },
+  not_applicable: { label: "Not used in this mode", tone: "gray" },
+};
 
 export default function PacingSafetyScreen() {
-  const ui = useScreen(mount);
+  const params = useSearchParams();
+  const { campaignId: headerCampaign, since } = useFilters();
+  const [picked, setPicked] = useState(null);
+  const wanted = picked ?? (Number(params.get("campaign")) || headerCampaign || null);
+  const pacing = useApi(`/pacing${qs({ campaign: wanted, since })}`, { interval: 4000 });
+  const data = pacing.data;
+  const selected = data?.selected;
+
+  const [tab, setTab] = useState(null);
+  const [changesOnly, setChangesOnly] = useState(true);
+  const [allCampaigns, setAllCampaigns] = useState(false);
+  const [page, setPage] = useState(0);
+  const decisionsPath = selected
+    ? `/decisions${qs({ campaign: allCampaigns ? null : selected.id, action: tab, since, changes: changesOnly ? 1 : null, limit: 200 })}`
+    : null;
+  const decisions = useApi(decisionsPath, { interval: 4000 });
+
+  const [decisionId, setDecisionId] = useState(() => Number(params.get("decision")) || null);
+  const [edits, setEdits] = useState({});
+  const [confirmReset, setConfirmReset] = useState(false);
+  const { run, busy } = useAction();
+  const toast = useToast();
+
+  const settings = data?.settings;
+  const value = (key) => (key in edits ? edits[key] : toInput(key, settingValue(settings, key)));
+  const edit = (key, text) => setEdits((all) => ({ ...all, [key]: text }));
+  const dirty = Object.keys(edits).some((key) => edits[key] !== toInput(key, settingValue(settings, key)));
+
+  const refreshAll = () => {
+    pacing.refresh();
+    decisions.refresh();
+  };
+
+  const save = async () => {
+    let body;
+    try {
+      body = buildPatch(edits);
+    } catch (e) {
+      toast({ tone: "error", title: "Check the configuration", detail: e.message });
+      return;
+    }
+    const ok = await run(() => put("/settings", body), "Configuration saved", "Used by every campaign from the next pacing round.");
+    if (ok) {
+      setEdits({});
+      refreshAll();
+    }
+  };
+
+  const resetDefaults = async () => {
+    const ok = await run(() => post("/settings/reset"), "Settings reset to defaults");
+    setConfirmReset(false);
+    if (ok) {
+      setEdits({});
+      refreshAll();
+    }
+  };
+
+  const setMode = async (mode) => {
+    if (!selected || selected.mode === mode) return;
+    const ok = await run(
+      () => patch(`/campaigns/${selected.id}`, { mode }),
+      `${selected.name} is now ${mode}`,
+      "Takes effect from the next pacing round.",
+    );
+    if (ok) refreshAll();
+  };
+
+  const rows = decisions.data?.decisions ?? [];
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const shown = rows.slice(Math.min(page, pages - 1) * PAGE, Math.min(page, pages - 1) * PAGE + PAGE);
+  const counts = decisions.data?.counts ?? {};
+  const total = decisions.data?.total ?? 0;
 
   return (
     <>
       <div className="bg-surface-page text-primaryText font-sans antialiased p-6 max-w-7xl mx-auto space-y-6 min-h-[calc(100vh-3.5rem)]">
-        {/* Top Section Header & Controls */}
-        <section className="flex flex-col md:flex-row md:items-center md:justify-between gap-4" data-purpose="page-title-banner">
+        <section className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold tracking-tight text-gray-900">
-                Pacing{" "}
-                &amp;
-                {" "}Safety
-              </h1>
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">Demo Simulation Mode</span>
+              <h1 className="text-2xl font-bold tracking-tight text-gray-900">Pacing &amp; Safety</h1>
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">Simulation</span>
             </div>
             <p className="text-xs text-gray-500 mt-1">Control dialing intensity, monitor campaign capacity, and understand safety decisions.</p>
           </div>
           <div className="flex items-center flex-wrap gap-2.5">
-            <button className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 shadow-xs" type="button">
-              <svg className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-              </svg>
+            <select
+              value={selected?.id ?? ""}
+              onChange={(e) => {
+                setPicked(Number(e.target.value));
+                setPage(0);
+              }}
+              disabled={!data?.campaigns?.length}
+              className="h-8 py-0 pl-2.5 pr-8 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-xs focus:ring-1 focus:ring-blue-500"
+              title="Campaign"
+            >
+              {(data?.campaigns ?? []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} · {campaignStatus(c.status).label}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs text-gray-400 hidden lg:inline">{rangeLabel(since)}</span>
+            <button
+              type="button"
+              onClick={refreshAll}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 shadow-xs"
+            >
+              <span className={`material-symbols-outlined text-[15px] text-gray-500 ${pacing.loading ? "animate-spin" : ""}`}>refresh</span>
               Refresh
             </button>
-            <button className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-300 rounded-md hover:bg-gray-50 shadow-xs" type="button">Reset Demo Defaults</button>
-            <button className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 shadow-sm shadow-blue-500/20" type="button">Save Configuration</button>
+            <button
+              type="button"
+              onClick={() => setConfirmReset(true)}
+              className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-300 rounded-md hover:bg-gray-50 shadow-xs"
+            >
+              Reset to defaults
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={!dirty || busy}
+              className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 shadow-sm shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {busy ? "Saving…" : "Save Configuration"}
+            </button>
           </div>
         </section>
-        {/* BEGIN: 4CompactKPICards */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" data-purpose="kpi-metrics-row">
-          {/* KPI 1: Dialing Mode */}
-          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-gray-500">Dialing Mode</span>
-              <span className="px-2 py-0.5 text-[11px] font-semibold bg-blue-50 text-blue-700 rounded-full border border-blue-200">Active Mode</span>
-            </div>
-            <div className="mt-3">
-              <div className="text-xl font-bold text-gray-900 tracking-tight">Predictive</div>
-              <p className="text-[11px] text-gray-500 mt-1 flex items-center gap-1">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                Safety-Gated Dynamic Sizing
-              </p>
-            </div>
+
+        <ErrorNote error={pacing.error} />
+
+        {!data ? (
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-28 rounded-xl" />
+            ))}
+          </section>
+        ) : !selected ? (
+          <div className="bg-white rounded-xl border border-surface-border">
+            <EmptyState icon="campaign" title="No campaigns yet" detail="Create a campaign to see its pacing and safety decisions." />
           </div>
-          {/* KPI 2: Active Calls */}
-          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-gray-500">Active Calls</span>
-              <span className="px-2 py-0.5 text-[11px] font-semibold bg-amber-50 text-amber-700 rounded-full border border-amber-200">In-Flight</span>
-            </div>
-            <div className="mt-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-gray-900 tracking-tight">12</span>
-                <span className="text-xs text-gray-400">/ 18 max ceiling</span>
-              </div>
-              <p className="text-[11px] text-gray-500 mt-1">85.7% Voice Trunk Occupancy</p>
-            </div>
-          </div>
-          {/* KPI 3: Available Agents */}
-          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-gray-500">Available Agents</span>
-              <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200">Healthy Buffer</span>
-            </div>
-            <div className="mt-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-gray-900 tracking-tight">14</span>
-                <span className="text-xs text-gray-400">Ready Standby</span>
-              </div>
-              <p className="text-[11px] text-gray-500 mt-1">38.9% Pool ready for transfer</p>
-            </div>
-          </div>
-          {/* KPI 4: Safety Blocks */}
-          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-gray-500">Safety Blocks</span>
-              <span className="px-2 py-0.5 text-[11px] font-semibold bg-indigo-50 text-indigo-700 rounded-full border border-indigo-200">Holds Triggered</span>
-            </div>
-            <div className="mt-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-gray-900 tracking-tight">7</span>
-                <span className="text-xs text-gray-400">interventions (24h)</span>
-              </div>
-              <p className="text-[11px] text-gray-500 mt-1">Pre-dial safety mitigations applied</p>
-            </div>
-          </div>
-        </section>
-        {/* END: 4CompactKPICards */}
-        {/* BEGIN: PacingAndCapacitySection */}
-        <section className="grid grid-cols-1 lg:grid-cols-12 gap-6" data-purpose="pacing-capacity-comparison">
-          {/* Left Card: Pacing Configuration (5 cols) */}
-          <div className="lg:col-span-5 bg-white p-5 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between space-y-5">
-            <div>
-              <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                <h2 className="text-sm font-bold text-gray-900">Pacing Configuration</h2>
-                <span className="text-[11px] font-mono text-gray-400">POL-ID #4492</span>
-              </div>
-              {/* Dialing Mode Selector Toggle */}
-              <div className="mt-4">
-                <label className="text-xs font-semibold text-gray-700 block mb-2">Operating Pacing Mode</label>
-                <div className="grid grid-cols-2 gap-3">
-                  {/* Progressive Option */}
-                  <div className="border border-gray-200 rounded-lg p-3 text-left opacity-75 hover:opacity-100 cursor-pointer transition-all">
-                    <div className="text-xs font-semibold text-gray-700">Progressive</div>
-                    <div className="text-[10px] text-gray-500 mt-0.5">1:1 Agent match, zero dropped calls</div>
-                  </div>
-                  {/* Predictive Option (Selected) */}
-                  <div className="border-2 border-blue-600 bg-blue-50/40 rounded-lg p-3 text-left relative cursor-pointer shadow-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-blue-900">Predictive</span>
-                      <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-                        <path clipRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" fillRule="evenodd" />
-                      </svg>
-                    </div>
-                    <div className="text-[10px] text-blue-700 mt-0.5 font-medium">Algorithmic batch dispatch</div>
-                  </div>
-                </div>
-              </div>
-              {/* Pacing Controls */}
-              <div className="mt-5 space-y-4">
-                {/* Slider: Expected Answer Rate */}
-                <div>
-                  <div className="flex justify-between items-center text-xs mb-1">
-                    <span className="font-medium text-gray-700">Expected Answer Rate</span>
-                    <span className="font-mono font-bold text-blue-600 text-xs">38%</span>
-                  </div>
-                  <input className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600" max="90" min="10" type="range" defaultValue="38" />
-                  <div className="flex justify-between text-[10px] text-gray-400 mt-1">
-                    <span>10% Low Pickup</span>
-                    <span>50% Mid</span>
-                    <span>90% High Response</span>
-                  </div>
-                </div>
-                {/* Input Fields Grid */}
-                <div className="grid grid-cols-2 gap-3 pt-1">
-                  <div>
-                    <label className="block text-[11px] font-medium text-gray-600 mb-1">Safety Margin</label>
-                    {" "}
-                    <select className="w-full text-xs bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1.5 text-gray-800 focus:ring-1 focus:ring-blue-500">
-                      <option>1.25x Conservative</option>
-                      <option>1.50x Balanced</option>
-                      <option>1.10x Ultra Safe</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-medium text-gray-600 mb-1">Max Concurrent Calls</label>
-                    {" "}
-                    <input className="w-full text-xs bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1.5 text-gray-800 font-mono focus:ring-1 focus:ring-blue-500" type="number" defaultValue="18" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-medium text-gray-600 mb-1">Ratio / Available Agent</label>
-                    <div className="text-xs bg-slate-50 border border-gray-200 rounded-md px-2.5 py-1.5 text-gray-700 font-mono flex items-center justify-between">
-                      <span>1.4x</span>
-                      <span className="text-[10px] text-gray-400">Batch Cap</span>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-medium text-gray-600 mb-1">Max Drop Rate Floor</label>
-                    <div className="text-xs bg-slate-50 border border-gray-200 rounded-md px-2.5 py-1.5 text-gray-700 font-mono">
-                      &lt;
-                      {" "}3.0% FCC SLA
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            {/* Explanatory note badge */}
-            <div className="mt-4 p-3 bg-blue-50/60 border border-blue-100 rounded-lg flex items-start gap-2.5">
-              <svg className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-              </svg>
-              <p className="text-[11px] text-blue-800 leading-relaxed">Pacing engine dynamically calculates target batch dispatch while respecting agent queue SLAs.</p>
-            </div>
-          </div>
-          {/* Right Card: Capacity Comparison & Limiter Distinction (7 cols) */}
-          <div className="lg:col-span-7 bg-white p-5 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+        ) : (
+          <>
+            <Kpis data={data} since={since} />
+            <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <PacingConfig data={data} value={value} edit={edit} setMode={setMode} busy={busy} dirty={dirty} />
+              <PacingOverview data={data} />
+            </section>
+            <SafetyMatrix data={data} value={value} edit={edit} />
+            <section className="bg-white rounded-xl border border-surface-border shadow-xs p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-sm font-bold text-gray-900">
-                    Pacing Overview{" "}
-                    &amp;
-                    {" "}Capacity Comparison
-                  </h2>
-                  <span className="text-[10px] font-semibold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">Buffer Active</span>
+                  <h2 className="text-sm font-bold text-gray-900">Answer Rate &amp; Capacity</h2>
+                  <span className="text-[11px] font-medium bg-purple-50 text-purple-700 border border-purple-200 px-2.5 py-0.5 rounded-full">Computed live</span>
                 </div>
-                <span className="text-xs text-gray-400">Realtime Snapshot</span>
-              </div>
-              {/* Capacity Comparison Bars */}
-              <div className="mt-4 space-y-3.5">
-                <div>
-                  <div className="flex justify-between text-xs font-medium mb-1">
-                    <span className="text-gray-700">Available Agent Capacity</span>
-                    <span className="text-gray-900 font-mono">
-                      14 agents{" "}
-                      <span className="text-gray-400 font-normal">(100% baseline)</span>
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden">
-                    <div className="bg-emerald-500 h-2.5 rounded-full" style={{ width: "100%" }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex justify-between text-xs font-medium mb-1">
-                    <span className="text-gray-700">Active In-Progress Calls</span>
-                    <span className="text-gray-900 font-mono">
-                      12 channels{" "}
-                      <span className="text-gray-400 font-normal">(85% capacity)</span>
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden">
-                    <div className="bg-blue-600 h-2.5 rounded-full" style={{ width: "85%" }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex justify-between text-xs font-medium mb-1">
-                    <span className="text-gray-700">Queued Call Targets</span>
-                    <span className="text-gray-900 font-mono">
-                      42 records{" "}
-                      <span className="text-gray-400 font-normal">awaiting batch</span>
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden">
-                    <div className="bg-indigo-400 h-2.5 rounded-full" style={{ width: "58%" }} />
-                  </div>
+                <div className="flex items-center gap-4 text-[11px] text-gray-500">
+                  <Legend color="bg-blue-600" label="Pacer would ask for" />
+                  <Legend color="bg-emerald-500" label="Safety would allow" />
+                  <Legend color="border-t-2 border-dashed border-slate-400 h-0" label="Expected-value batch" />
                 </div>
               </div>
-              {/* Pacer vs Safety Distinction Box */}
-              <div className="mt-5 p-4 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50/70 to-indigo-50/50">
-                <div className="text-xs font-bold text-gray-800 uppercase tracking-wider mb-2">Engine vs Safety Divergence</div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-white p-3 rounded-lg border border-blue-100 shadow-2xs">
-                    <span className="text-[11px] text-gray-500 block">Pacer Suggested Volume</span>
-                    {" "}
-                    <span className="text-xl font-mono font-bold text-blue-700">
-                      16{" "}
-                      <span className="text-xs font-normal text-gray-500">attempts</span>
-                    </span>
-                    {" "}
-                    <span className="text-[10px] text-gray-400 block mt-0.5">Based on 38% answer model</span>
-                  </div>
-                  <div className="bg-white p-3 rounded-lg border border-amber-200 shadow-2xs">
-                    <span className="text-[11px] text-gray-500 block">Calls Permitted by Safety</span>
-                    {" "}
-                    <span className="text-xl font-mono font-bold text-amber-600">
-                      10{" "}
-                      <span className="text-xs font-normal text-gray-500">calls cap</span>
-                    </span>
-                    {" "}
-                    <span className="text-[10px] text-gray-400 block mt-0.5">Trunk headroom constraint</span>
-                  </div>
-                </div>
-                {/* Highlight gap banner */}
-                <div className="mt-3 flex items-center justify-between text-xs bg-amber-100/70 border border-amber-300 text-amber-900 px-3 py-1.5 rounded-md font-medium">
-                  <span className="flex items-center gap-1.5">
-                    <svg className="w-4 h-4 text-amber-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-                    </svg>
-                    Limiter Gap: -6 calls held back to prevent queue spikes
-                  </span>
-                  <span className="text-[10px] font-mono font-semibold bg-white/80 px-1.5 py-0.5 rounded">DELTA -37.5%</span>
+              <SensitivityChart rows={data.sensitivity} />
+              <p className="text-[11px] text-gray-400 text-center">
+                Worked out by the live predictive pacer and safety controller for {num(data.sensitivity?.[0]?.agents ?? 0)} online agents, as if all
+                were free with nothing ringing. It isn&apos;t a forecast, and a higher answer rate doesn&apos;t mean higher productivity without free agents to take the calls.
+              </p>
+            </section>
+          </>
+        )}
+
+        {selected && (
+          <section className="bg-white rounded-xl border border-surface-border shadow-xs overflow-hidden">
+            <div className="p-5 border-b border-surface-border flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-bold text-gray-900">Recent Safety Decisions</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Every pacing round the safety controller reviews the pacer&apos;s request. Counts cover {rangeLabel(since).toLowerCase()}
+                  {allCampaigns ? " across all campaigns" : ` for ${selected.name}`}.
+                </p>
+              </div>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <div className="flex items-center gap-1.5 bg-gray-100 p-1 rounded-lg text-xs font-medium overflow-x-auto">
+                  <TabButton active={tab === null} onClick={() => { setTab(null); setPage(0); }}>
+                    All ({num(total)})
+                  </TabButton>
+                  {TABS.map((action) => (
+                    <TabButton key={action} active={tab === action} onClick={() => { setTab(action); setPage(0); }}>
+                      {decision(action).label} ({num(counts[action] ?? 0)})
+                    </TabButton>
+                  ))}
                 </div>
               </div>
             </div>
-            {/* Shield explanation */}
-            <div className="mt-4 flex items-center gap-2 text-[11px] text-gray-500">
-              <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-              </svg>
-              <span>The pacing engine suggests a dialing volume. The safety controller independently determines whether that volume is permitted.</span>
+            <div className="px-5 py-2.5 border-b border-gray-100 flex flex-wrap items-center gap-4 text-[11px] text-gray-600 bg-gray-50/40">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" checked={changesOnly} onChange={(e) => { setChangesOnly(e.target.checked); setPage(0); }} className="rounded border-gray-300 text-blue-600 w-3.5 h-3.5" />
+                Only rounds where the decision changed
+              </label>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" checked={allCampaigns} onChange={(e) => { setAllCampaigns(e.target.checked); setPage(0); }} className="rounded border-gray-300 text-blue-600 w-3.5 h-3.5" />
+                All campaigns
+              </label>
+              {changesOnly && <span className="text-gray-400">A cold start repeats the same decision every second, so repeats are hidden.</span>}
             </div>
-          </div>
-        </section>
-        {/* END: PacingAndCapacitySection */}
-        {/* BEGIN: SafetyControllerMatrixCard */}
-        <section className="bg-white rounded-xl border border-surface-border shadow-xs overflow-hidden" data-purpose="safety-rules-matrix">
-          <div className="p-5 border-b border-surface-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h2 className="text-sm font-bold text-gray-900">Safety Controller Matrix</h2>
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  Operational
+            <ErrorNote error={decisions.error} className="m-4" />
+            {!decisions.data ? (
+              <div className="p-5 space-y-2">
+                {[0, 1, 2, 3].map((i) => (
+                  <Skeleton key={i} className="h-8" />
+                ))}
+              </div>
+            ) : rows.length === 0 ? (
+              <EmptyState icon="verified_user" title="No decisions match" detail="Try another tab, include repeated rounds, or widen the time range." />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-50/70 border-b border-gray-100 text-gray-500 font-semibold uppercase text-[10px] tracking-wider">
+                    <tr>
+                      <th className="py-3 px-5">Time</th>
+                      <th className="py-3 px-4">Campaign</th>
+                      <th className="py-3 px-4">Decision</th>
+                      <th className="py-3 px-4">Trigger</th>
+                      <th className="py-3 px-4">Pacing Mode</th>
+                      <th className="py-3 px-4 text-center">Calls</th>
+                      <th className="py-3 px-5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 text-gray-700">
+                    {shown.map((d) => (
+                      <DecisionRow key={d.id} d={d} onInspect={() => setDecisionId(d.id)} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {rows.length > 0 && (
+              <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
+                <span>
+                  Showing {Math.min(page, pages - 1) * PAGE + 1}-{Math.min(rows.length, (Math.min(page, pages - 1) + 1) * PAGE)} of {num(rows.length)}
+                  {rows.length >= 200 ? " most recent" : ""} rows
                 </span>
-                <span className="text-xs text-gray-400">· 5 Global Safeguards Active</span>
+                <div className="flex items-center gap-1 font-medium">
+                  <button type="button" disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))} className="px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50">
+                    Previous
+                  </button>
+                  <span className="px-2.5 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-bold">
+                    {Math.min(page, pages - 1) + 1} / {pages}
+                  </span>
+                  <button type="button" disabled={page >= pages - 1} onClick={() => setPage((p) => Math.min(pages - 1, p + 1))} className="px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50">
+                    Next
+                  </button>
+                </div>
               </div>
-              <p className="text-xs text-gray-500 mt-1">The safety controller can reduce or block new call initiation independently of the selected pacing mode.</p>
-            </div>
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-gray-500">Fallback Strategy:</span>
-              <span className="px-2 py-1 bg-gray-100 rounded text-gray-700 font-mono text-[11px] font-medium">Forced Progressive</span>
-            </div>
-          </div>
-          {/* Table of rules */}
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-gray-50/70 border-b border-gray-100 text-gray-500 font-semibold uppercase text-[10px] tracking-wider">
-                <tr>
-                  <th className="py-3 px-5" scope="col">Safety Rule</th>
-                  <th className="py-3 px-4" scope="col">Current Metric</th>
-                  <th className="py-3 px-4" scope="col">Threshold Boundary</th>
-                  <th className="py-3 px-4" scope="col">Status</th>
-                  <th className="py-3 px-5" scope="col">
-                    Rule Description{" "}
-                    &amp;
-                    {" "}Behavioral Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 text-gray-700">
-                {/* Row 1 */}
-                <tr className="hover:bg-gray-50/50 transition-colors">
-                  <td className="py-3.5 px-5 font-semibold text-gray-900">Max Concurrent Active Calls</td>
-                  <td className="py-3.5 px-4 font-mono font-medium text-blue-600">12 calls</td>
-                  <td className="py-3.5 px-4 font-mono text-gray-500">18 calls max</td>
-                  <td className="py-3.5 px-4">
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-emerald-50 text-emerald-700 font-medium border border-emerald-200">Normal (66%)</span>
-                  </td>
-                  <td className="py-3.5 px-5 text-gray-500 text-[11px]">Hard carrier trunk ceiling across all active SIP gateways.</td>
-                </tr>
-                {/* Row 2 */}
-                <tr className="hover:bg-gray-50/50 transition-colors">
-                  <td className="py-3.5 px-5 font-semibold text-gray-900">Max Unanswered / Abandoned Ratio</td>
-                  <td className="py-3.5 px-4 font-mono font-medium text-emerald-600">1.8%</td>
-                  <td className="py-3.5 px-4 font-mono text-gray-500">3.0% max boundary</td>
-                  <td className="py-3.5 px-4">
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-emerald-50 text-emerald-700 font-medium border border-emerald-200">Optimal</span>
-                  </td>
-                  <td className="py-3.5 px-5 text-gray-500 text-[11px]">Auto-throttles pacer if unanswered call spikes exceed safety boundary.</td>
-                </tr>
-                {/* Row 3 */}
-                <tr className="hover:bg-gray-50/50 transition-colors bg-rose-50/20">
-                  <td className="py-3.5 px-5 font-semibold text-gray-900">Max Calls Per Campaign Window</td>
-                  <td className="py-3.5 px-4 font-mono font-bold text-rose-600">8 calls/min</td>
-                  <td className="py-3.5 px-4 font-mono text-gray-500">12 calls/min</td>
-                  <td className="py-3.5 px-4">
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-rose-50 text-rose-700 font-medium border border-rose-200">Throttled</span>
-                  </td>
-                  <td className="py-3.5 px-5 text-gray-500 text-[11px]">Enforces burst limits to avoid sudden agent starvation.</td>
-                </tr>
-                {/* Row 4 */}
-                <tr className="hover:bg-gray-50/50 transition-colors">
-                  <td className="py-3.5 px-5 font-semibold text-gray-900">Predictive Over-Dial Limit</td>
-                  <td className="py-3.5 px-4 font-mono font-medium text-blue-600">1.1x</td>
-                  <td className="py-3.5 px-4 font-mono text-gray-500">1.4x ceiling</td>
-                  <td className="py-3.5 px-4">
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-blue-50 text-blue-700 font-medium border border-blue-200">Safe</span>
-                  </td>
-                  <td className="py-3.5 px-5 text-gray-500 text-[11px]">Prevents algorithmic over-dialing when available agent count drops below 5.</td>
-                </tr>
-                {/* Row 5 */}
-                <tr className="hover:bg-gray-50/50 transition-colors">
-                  <td className="py-3.5 px-5 font-semibold text-gray-900">Provider Error-Rate Threshold</td>
-                  <td className="py-3.5 px-4 font-mono font-medium text-emerald-600">0.2%</td>
-                  <td className="py-3.5 px-4 font-mono text-gray-500">1.5% trip circuit</td>
-                  <td className="py-3.5 px-4">
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-emerald-50 text-emerald-700 font-medium border border-emerald-200">Operational</span>
-                  </td>
-                  <td className="py-3.5 px-5 text-gray-500 text-[11px]">Automatic failover circuit breaker for carrier SIP 503/504 errors.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        {/* END: SafetyControllerMatrixCard */}
-        {/* BEGIN: SimulationCard */}
-        <section className="bg-white rounded-xl border border-surface-border shadow-xs p-5 space-y-4" data-purpose="answer-rate-simulation">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-bold text-gray-900">
-                Answer Rate{" "}
-                &amp;
-                {" "}Capacity Impact Simulation
-              </h2>
-              <span className="text-[11px] font-medium bg-purple-50 text-purple-700 border border-purple-200 px-2.5 py-0.5 rounded-full">Sensitivity Matrix</span>
-            </div>
-            <span className="text-xs text-gray-400">Fixed Agent Buffer: 14 reps</span>
-          </div>
-          {/* 3 Scenario Comparison Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Scenario 1: 20% Answer Rate */}
-            <div className="border border-gray-200 rounded-lg p-4 bg-slate-50/40 hover:border-blue-300 transition-colors">
-              <div className="flex items-center justify-between pb-2 border-b border-gray-200">
-                <span className="text-xs font-bold text-gray-800">20% Answer Rate</span>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-100 text-emerald-800">Safe</span>
-              </div>
-              <div className="mt-3 space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Suggested Dispatch:</span>
-                  <span className="font-mono font-semibold text-gray-900">24 calls</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Permitted by Safety:</span>
-                  <span className="font-mono font-semibold text-emerald-700">16 calls</span>
-                </div>
-                <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden mt-1">
-                  <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: "66%" }} />
-                </div>
-                <p className="text-[11px] text-gray-500 pt-1 leading-normal">Low pickup likelihood permits larger batch sizing under strict trunk cap.</p>
-              </div>
-            </div>
-            {/* Scenario 2: 50% Answer Rate */}
-            <div className="border border-gray-200 rounded-lg p-4 bg-slate-50/40 hover:border-blue-300 transition-colors">
-              <div className="flex items-center justify-between pb-2 border-b border-gray-200">
-                <span className="text-xs font-bold text-gray-800">50% Answer Rate</span>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-amber-100 text-amber-800">Tight Buffer</span>
-              </div>
-              <div className="mt-3 space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Suggested Dispatch:</span>
-                  <span className="font-mono font-semibold text-gray-900">14 calls</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Permitted by Safety:</span>
-                  <span className="font-mono font-semibold text-amber-700">12 calls</span>
-                </div>
-                <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden mt-1">
-                  <div className="bg-amber-500 h-1.5 rounded-full" style={{ width: "85%" }} />
-                </div>
-                <p className="text-[11px] text-gray-500 pt-1 leading-normal">Medium pickup rates require conservative dispatch to preserve agent queue.</p>
-              </div>
-            </div>
-            {/* Scenario 3: 70% Answer Rate */}
-            <div className="border border-gray-200 rounded-lg p-4 bg-slate-50/40 hover:border-blue-300 transition-colors">
-              <div className="flex items-center justify-between pb-2 border-b border-gray-200">
-                <span className="text-xs font-bold text-gray-800">70% Answer Rate</span>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-rose-100 text-rose-800">Progressive Fallback</span>
-              </div>
-              <div className="mt-3 space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Suggested Dispatch:</span>
-                  <span className="font-mono font-semibold text-gray-900">9 calls</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Permitted by Safety:</span>
-                  <span className="font-mono font-semibold text-rose-700">8 calls</span>
-                </div>
-                <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden mt-1">
-                  <div className="bg-rose-500 h-1.5 rounded-full" style={{ width: "90%" }} />
-                </div>
-                <p className="text-[11px] text-gray-500 pt-1 leading-normal">High answer rate behaves near 1:1 progressive to eliminate abandoned transfers.</p>
-              </div>
-            </div>
-          </div>
-          <div className="text-[11px] text-gray-400 text-center pt-1">Illustrative Simulation Data • A higher answer rate does not imply higher productivity without available agent buffers.</div>
-        </section>
-        {/* END: SimulationCard */}
-        {/* BEGIN: DecisionsTableSection */}
-        <section className="bg-white rounded-xl border border-surface-border shadow-xs overflow-hidden" data-purpose="safety-decisions-history">
-          <div className="p-5 border-b border-surface-border flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <h2 className="text-sm font-bold text-gray-900">Recent Safety Decisions</h2>
-              <p className="text-xs text-gray-500 mt-0.5">
-                Chronological audit stream of pacer proposal evaluations{" "}
-                &amp;
-                {" "}limits.
-              </p>
-            </div>
-            {/* Filter tabs */}
-            <div className="flex items-center gap-1.5 bg-gray-100 p-1 rounded-lg text-xs font-medium">
-              <button className="px-2.5 py-1 bg-white text-gray-900 rounded-md shadow-2xs font-semibold">All Decisions (14)</button>
-              <button className="px-2.5 py-1 text-gray-600 hover:text-gray-900 rounded-md">Approved (8)</button>
-              <button className="px-2.5 py-1 text-gray-600 hover:text-gray-900 rounded-md">Reduced (3)</button>
-              <button className="px-2.5 py-1 text-gray-600 hover:text-gray-900 rounded-md">Blocked (2)</button>
-              <button className="px-2.5 py-1 text-gray-600 hover:text-gray-900 rounded-md">Forced Progressive (1)</button>
-            </div>
-          </div>
-          {/* Table */}
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-gray-50/70 border-b border-gray-100 text-gray-500 font-semibold uppercase text-[10px] tracking-wider">
-                <tr>
-                  <th className="py-3 px-5" scope="col">Time</th>
-                  <th className="py-3 px-4" scope="col">Campaign</th>
-                  <th className="py-3 px-4" scope="col">Decision</th>
-                  <th className="py-3 px-4" scope="col">Trigger Condition</th>
-                  <th className="py-3 px-4" scope="col">Pacing Mode</th>
-                  <th className="py-3 px-4 text-center" scope="col">Calls Affected</th>
-                  <th className="py-3 px-5 text-right" scope="col">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 text-gray-700">
-                {/* Decision 1 */}
-                <tr className="hover:bg-gray-50/60 transition-colors">
-                  <td className="py-3 px-5 font-mono text-gray-500 text-[11px]">14:48:02</td>
-                  <td className="py-3 px-4 font-semibold text-gray-900">Q3 Renewal Outreach</td>
-                  <td className="py-3 px-4">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Approved</span>
-                  </td>
-                  <td className="py-3 px-4 text-gray-600">Normal batch dispatch; within safe SLAs</td>
-                  <td className="py-3 px-4 font-mono text-gray-500">Predictive</td>
-                  <td className="py-3 px-4 font-mono text-center text-gray-900">6 suggested / 6 dial</td>
-                  <td className="py-3 px-5 text-right">
-                    <button className="text-blue-600 hover:text-blue-800 font-medium text-xs hover:underline" onClick={(e) => ui(e).openDrawer('DEC-8419', 'Reduced', 'Auto Claims Pilot', 'Max Concurrent Active Calls (Ceiling reached)', 'Predictive', '16 suggested', '10 permitted')} type="button">Inspect</button>
-                  </td>
-                </tr>
-                {/* Decision 2 (Focus item for drawer inspection) */}
-                <tr className="hover:bg-gray-50/60 transition-colors bg-amber-50/30">
-                  <td className="py-3 px-5 font-mono text-gray-500 text-[11px]">14:46:11</td>
-                  <td className="py-3 px-4 font-semibold text-gray-900">Auto Claims Pilot</td>
-                  <td className="py-3 px-4">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">Reduced</span>
-                  </td>
-                  <td className="py-3 px-4 text-gray-700 font-medium">Trunk capacity ceiling near threshold</td>
-                  <td className="py-3 px-4 font-mono text-gray-500">Predictive</td>
-                  <td className="py-3 px-4 font-mono text-center text-amber-800 font-semibold">16 suggested / 10 dial</td>
-                  <td className="py-3 px-5 text-right">
-                    <button className="text-blue-600 hover:text-blue-800 font-medium text-xs hover:underline" onClick={(e) => ui(e).openDrawer('DEC-8419', 'Reduced', 'Auto Claims Pilot', 'Max Concurrent Active Calls (Ceiling reached)', 'Predictive', '16 suggested', '10 permitted')} type="button">Inspect</button>
-                  </td>
-                </tr>
-                {/* Decision 3 */}
-                <tr className="hover:bg-gray-50/60 transition-colors">
-                  <td className="py-3 px-5 font-mono text-gray-500 text-[11px]">14:43:55</td>
-                  <td className="py-3 px-4 font-semibold text-gray-900">Cold Inquiries Tier 1</td>
-                  <td className="py-3 px-4">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">Blocked</span>
-                  </td>
-                  <td className="py-3 px-4 text-gray-600">Available agent count dropped below 2</td>
-                  <td className="py-3 px-4 font-mono text-gray-500">Predictive</td>
-                  <td className="py-3 px-4 font-mono text-center text-rose-700 font-semibold">8 suggested / 0 dial</td>
-                  <td className="py-3 px-5 text-right">
-                    <button className="text-blue-600 hover:text-blue-800 font-medium text-xs hover:underline" onClick={(e) => ui(e).openDrawer('DEC-8417', 'Blocked', 'Cold Inquiries Tier 1', 'Agent Starvation Prevention (<2 agents ready)', 'Predictive', '8 suggested', '0 permitted')} type="button">Inspect</button>
-                  </td>
-                </tr>
-                {/* Decision 4 */}
-                <tr className="hover:bg-gray-50/60 transition-colors">
-                  <td className="py-3 px-5 font-mono text-gray-500 text-[11px]">14:40:18</td>
-                  <td className="py-3 px-4 font-semibold text-gray-900">Auto Claims Pilot</td>
-                  <td className="py-3 px-4">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">Forced Progressive</span>
-                  </td>
-                  <td className="py-3 px-4 text-gray-600">Unanswered ratio spiked to 2.9%</td>
-                  <td className="py-3 px-4 font-mono text-gray-500">Forced Progressive</td>
-                  <td className="py-3 px-4 font-mono text-center text-gray-700">1:1 match enforced</td>
-                  <td className="py-3 px-5 text-right">
-                    <button className="text-blue-600 hover:text-blue-800 font-medium text-xs hover:underline" onClick={(e) => ui(e).openDrawer('DEC-8412', 'Forced Progressive', 'Auto Claims Pilot', 'Unanswered ratio exceeded 2.5% boundary', 'Forced Progressive', '12 suggested', '4 permitted')} type="button">Inspect</button>
-                  </td>
-                </tr>
-                {/* Decision 5 */}
-                <tr className="hover:bg-gray-50/60 transition-colors">
-                  <td className="py-3 px-5 font-mono text-gray-500 text-[11px]">14:38:00</td>
-                  <td className="py-3 px-4 font-semibold text-gray-900">Q3 Renewal Outreach</td>
-                  <td className="py-3 px-4">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Approved</span>
-                  </td>
-                  <td className="py-3 px-4 text-gray-600">Standard batch evaluation; safe buffer</td>
-                  <td className="py-3 px-4 font-mono text-gray-500">Predictive</td>
-                  <td className="py-3 px-4 font-mono text-center text-gray-900">8 suggested / 8 dial</td>
-                  <td className="py-3 px-5 text-right">
-                    <button className="text-blue-600 hover:text-blue-800 font-medium text-xs hover:underline" onClick={(e) => ui(e).openDrawer('DEC-8409', 'Approved', 'Q3 Renewal Outreach', 'All safety gates clear', 'Predictive', '8 suggested', '8 permitted')} type="button">Inspect</button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          {/* Table Footer Pagination */}
-          <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
-            <span>Showing 1-5 of 14 safety decisions</span>
-            <div className="flex items-center gap-1 font-medium">
-              <button className="px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50" disabled>
-                &lt;
-                {" "}Previous
-              </button>
-              <button className="px-2.5 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-bold">1</button>
-              <button className="px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50">2</button>
-              <button className="px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50">3</button>
-              <button className="px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50">
-                Next{" "}
-                &gt;
-              </button>
-            </div>
-          </div>
-        </section>
-        {/* END: DecisionsTableSection */}
+            )}
+          </section>
+        )}
       </div>
-      <div aria-labelledby="slide-over-title" aria-modal="true" className="fixed inset-0 z-50 overflow-hidden hidden" data-purpose="safety-inspector-drawer" id="inspectorDrawer" role="dialog">
-        {/* Backdrop */}
-        <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity" id="drawerBackdrop" onClick={(e) => ui(e).closeDrawer()} />
-        <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
-          {/* Drawer Panel */}
-          <div className="w-screen max-w-md bg-white border-l border-surface-border shadow-2xl flex flex-col">
-            {/* Drawer Header */}
-            <div className="p-5 border-b border-surface-border flex items-center justify-between bg-slate-50/70">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono font-bold text-gray-500" id="drawerDecisionId">#DEC-8419</span>
-                  <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-amber-100 text-amber-800" id="drawerDecisionBadge">Reduced</span>
-                </div>
-                <h3 className="text-base font-bold text-gray-900 mt-1" id="slide-over-title">Decision Inspector</h3>
-              </div>
-              <button aria-label="Close Inspector" className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-colors" onClick={(e) => ui(e).closeDrawer()} type="button">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-                </svg>
-              </button>
+
+      <DecisionDrawer id={decisionId} onClose={() => setDecisionId(null)} />
+      <ConfirmDialog
+        open={confirmReset}
+        title="Reset pacing and safety settings?"
+        message="Every pacing, safety, timeout and screening setting goes back to its default for all campaigns. Campaign modes are not changed."
+        confirmLabel="Reset to defaults"
+        danger
+        busy={busy}
+        onConfirm={resetDefaults}
+        onCancel={() => setConfirmReset(false)}
+      />
+    </>
+  );
+}
+
+function Kpis({ data, since }) {
+  const { selected, overview, settings, actions, snapshot, status } = data;
+  const forced = status === "forced_progressive";
+  const max = settings.safety.max_active_calls;
+  return (
+    <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <Kpi
+        label="Dialing Mode"
+        badge={forced ? { text: "Forced progressive", cls: "bg-purple-50 text-purple-700 border-purple-200" } : { text: campaignStatus(selected.status).label, cls: "bg-blue-50 text-blue-700 border-blue-200" }}
+        value={<div className="text-xl font-bold text-gray-900 tracking-tight">{humanize(selected.mode)}</div>}
+        note={
+          <span className="flex items-center gap-1">
+            <span className={`inline-block w-1.5 h-1.5 rounded-full ${TONE[safetyStatus(status).tone].dot}`} />
+            {forced ? "Safety is running it one call per free agent" : selected.screening ? "Screening bot calls first" : "Direct calls to agents"}
+          </span>
+        }
+      />
+      <Kpi
+        label="Active Calls"
+        badge={{ text: "Live", cls: "bg-amber-50 text-amber-700 border-amber-200" }}
+        value={
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-gray-900 tracking-tight">{num(overview.active_calls)}</span>
+            <span className="text-xs text-gray-400">/ {num(max)} ceiling</span>
+          </div>
+        }
+        note={`${num(overview.in_flight)} dialing or with the bot`}
+      />
+      <Kpi
+        label="Available Agents"
+        badge={{ text: overview.available_agents ? "Free now" : "All busy", cls: overview.available_agents ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-600 border-gray-200" }}
+        value={
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-gray-900 tracking-tight">{num(overview.available_agents)}</span>
+            <span className="text-xs text-gray-400">of {num(snapshot.staffed_agents)} staffed</span>
+          </div>
+        }
+        note={`Capacity ${num(overview.capacity)} incl. wrap-ups ending soon`}
+      />
+      <Kpi
+        label="Safety Blocks"
+        badge={{ text: rangeLabel(since), cls: "bg-indigo-50 text-indigo-700 border-indigo-200" }}
+        value={
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-gray-900 tracking-tight">{num(actions.REJECT ?? 0)}</span>
+            <span className="text-xs text-gray-400">rounds blocked</span>
+          </div>
+        }
+        note={`${num(actions.REDUCE ?? 0)} reduced · ${num(actions.FORCE_PROGRESSIVE ?? 0)} forced progressive`}
+      />
+    </section>
+  );
+}
+
+function Kpi({ label, badge, value, note }) {
+  return (
+    <div className="bg-white p-4 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-gray-500">{label}</span>
+        <span className={`px-2 py-0.5 text-[11px] font-semibold rounded-full border truncate ${badge.cls}`}>{badge.text}</span>
+      </div>
+      <div className="mt-3">
+        {value}
+        <div className="text-[11px] text-gray-500 mt-1">{note}</div>
+      </div>
+    </div>
+  );
+}
+
+function PacingConfig({ data, value, edit, setMode, busy, dirty }) {
+  const { selected } = data;
+  const answer = Number(value("pacing.prior_answer_rate")) || 0;
+  const margin = Number(value("pacing.max_abandon_risk"));
+  const margins = MARGINS.some((m) => m.value === margin) ? MARGINS : [...MARGINS, { value: margin, label: `${pct(margin, 1)} · Custom` }];
+  return (
+    <div className="lg:col-span-5 bg-white p-5 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between space-y-5">
+      <div>
+        <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+          <h2 className="text-sm font-bold text-gray-900">Pacing Configuration</h2>
+          {dirty && <span className="text-[11px] font-semibold text-amber-600">Unsaved changes</span>}
+        </div>
+        <div className="mt-4">
+          <label className="text-xs font-semibold text-gray-700 block mb-2">Pacing mode for {selected.name}</label>
+          <div className="grid grid-cols-2 gap-3">
+            <ModeCard
+              active={selected.mode === "progressive"}
+              disabled={busy}
+              onClick={() => setMode("progressive")}
+              title="Progressive"
+              text="A call starts only when a free agent and a borrower have both been reserved."
+              points={["One agent at a time", "Conservative initiation"]}
+            />
+            <ModeCard
+              active={selected.mode === "predictive"}
+              disabled={busy}
+              onClick={() => setMode("predictive")}
+              title="Predictive"
+              text="Dials ahead from the expected answer rate and free agent capacity."
+              points={["Capacity-aware batch size", "Risk-limited by safety"]}
+            />
+          </div>
+          <p className="text-[10.5px] text-gray-400 mt-1.5">Mode is set per campaign and applies right away. The settings below are shared by every campaign.</p>
+        </div>
+        <div className="mt-5 space-y-4">
+          <div>
+            <div className="flex justify-between items-center text-xs mb-1">
+              <span className="font-medium text-gray-700">Expected answer rate</span>
+              <span className="font-mono font-bold text-blue-600 text-xs">{answer}%</span>
             </div>
-            {/* Drawer Content Body */}
-            <div className="p-5 flex-1 overflow-y-auto space-y-5 text-xs">
-              {/* Metadata Attributes */}
-              <div className="bg-gray-50 p-3.5 rounded-lg border border-gray-200/80 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Campaign Target:</span>
-                  <span className="font-semibold text-gray-900" id="drawerCampaign">Auto Claims Pilot</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Trigger Condition:</span>
-                  <span className="font-medium text-gray-800 text-right max-w-[200px]" id="drawerTrigger">Max Concurrent Active Calls</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Selected Pacing Mode:</span>
-                  <span className="font-mono text-gray-700" id="drawerMode">Predictive</span>
-                </div>
-              </div>
-              {/* Suggested vs Permitted Meter */}
-              <div className="p-4 border border-blue-100 bg-blue-50/40 rounded-xl space-y-3">
-                <div className="text-xs font-bold text-gray-800">Dispatch Comparison</div>
-                <div className="grid grid-cols-2 gap-2 text-center">
-                  <div className="bg-white p-2.5 rounded-md border border-gray-200">
-                    <span className="text-[10px] text-gray-400 block uppercase">Pacer Requested</span>
-                    {" "}
-                    <span className="text-base font-mono font-bold text-blue-700" id="drawerSuggested">16 suggested</span>
-                  </div>
-                  <div className="bg-white p-2.5 rounded-md border border-amber-200">
-                    <span className="text-[10px] text-gray-400 block uppercase">Permitted Release</span>
-                    {" "}
-                    <span className="text-base font-mono font-bold text-amber-600" id="drawerPermitted">10 permitted</span>
-                  </div>
-                </div>
-                <div className="text-[11px] text-gray-600 bg-white/70 p-2 rounded border border-gray-200/60 leading-relaxed">Trunk ceiling safeguard intercepted 6 dispatch calls to prevent queue hold time degradation above the 45s threshold.</div>
-              </div>
-              {/* Event Evaluation Timeline */}
-              <div>
-                <div className="font-bold text-gray-900 mb-3 text-xs">Evaluation Timeline Steps</div>
-                <div className="relative pl-6 space-y-4 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-gray-200">
-                  {/* Step 1 */}
-                  <div className="relative">
-                    <span className="absolute -left-6 top-1 w-2.5 h-2.5 rounded-full bg-blue-500 ring-4 ring-white" />
-                    <div className="text-gray-800 font-semibold text-[11px]">Pacing Engine Calculation</div>
-                    <div className="text-[10px] text-gray-400">14:46:11.020 · 38% answer probability requested 16 outbound rings.</div>
-                  </div>
-                  {/* Step 2 */}
-                  <div className="relative">
-                    <span className="absolute -left-6 top-1 w-2.5 h-2.5 rounded-full bg-amber-500 ring-4 ring-white" />
-                    <div className="text-gray-800 font-semibold text-[11px]">Safety Matrix Intercept</div>
-                    <div className="text-[10px] text-gray-400">14:46:11.085 · Carrier trunk threshold cap exceeded (12 / 18 active).</div>
-                  </div>
-                  {/* Step 3 */}
-                  <div className="relative">
-                    <span className="absolute -left-6 top-1 w-2.5 h-2.5 rounded-full bg-emerald-500 ring-4 ring-white" />
-                    <div className="text-gray-800 font-semibold text-[11px]">Reduced Volume Release Dispatched</div>
-                    <div className="text-[10px] text-gray-400">14:46:11.140 · Dial batch reduced from 16 to 10. Queue buffer preserved.</div>
-                  </div>
-                </div>
-              </div>
+            <input
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+              type="range"
+              min="10"
+              max="90"
+              value={answer}
+              onChange={(e) => edit("pacing.prior_answer_rate", e.target.value)}
+            />
+            <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+              <span>10%</span>
+              <span>50%</span>
+              <span>90%</span>
             </div>
-            {/* Drawer Footer */}
-            <div className="p-4 border-t border-surface-border bg-gray-50 flex items-center justify-between">
-              <button className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50" onClick={(e) => ui(e).closeDrawer()} type="button">Close</button>
-              <a className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 shadow-xs inline-flex items-center gap-1.5" href="#">
-                <span>View in Live Operations</span>
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path d="M14 5l7 7m0 0l-7 7m7-7H3" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-                </svg>
-              </a>
+            <p className="text-[10.5px] text-gray-400 mt-1">
+              Starting estimate the pacer blends with observed outcomes; it matters most before there&apos;s enough history.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 pt-1">
+            <div>
+              <label className="block text-[11px] font-medium text-gray-600 mb-1">Safety margin</label>
+              <select
+                value={margin}
+                onChange={(e) => edit("pacing.max_abandon_risk", e.target.value)}
+                className="w-full text-xs bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1.5 text-gray-800 focus:ring-1 focus:ring-blue-500"
+              >
+                {margins.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <NumberField label="Max concurrent calls" k="safety.max_active_calls" value={value} edit={edit} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <NumberField label="Max outstanding calls per free agent" k="safety.max_overdial_ratio" value={value} edit={edit} step="0.1" suffix="×" />
+            <div className="text-[10.5px] text-gray-400 leading-relaxed self-end">
+              Safety margin is the accepted chance, per decision, that more people answer than there are free agents.
             </div>
           </div>
         </div>
       </div>
-    </>
+      <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-lg flex items-start gap-2.5">
+        <span className="material-symbols-outlined text-[16px] text-blue-600 mt-0.5">info</span>
+        <p className="text-[11px] text-blue-800 leading-relaxed">
+          The pacer plans with an upper bound on the answer rate, so guessing high costs idle time rather than abandoned calls.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function ModeCard({ active, disabled, onClick, title, text, points }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      className={`rounded-lg p-3 text-left transition-all disabled:cursor-wait ${
+        active ? "border-2 border-blue-600 bg-blue-50/40 shadow-xs" : "border border-gray-200 opacity-80 hover:opacity-100 hover:border-gray-300"
+      }`}
+    >
+      <div className="flex items-center justify-between">
+        <span className={`text-xs ${active ? "font-bold text-blue-900" : "font-semibold text-gray-700"}`}>{title}</span>
+        {active && <span className="material-symbols-outlined text-[16px] text-blue-600">check_circle</span>}
+      </div>
+      <div className={`text-[10px] mt-0.5 ${active ? "text-blue-700" : "text-gray-500"}`}>{text}</div>
+      <ul className="mt-1.5 space-y-0.5">
+        {points.map((p) => (
+          <li key={p} className="text-[10px] text-gray-500">· {p}</li>
+        ))}
+      </ul>
+      {active && <span className="sr-only">Selected</span>}
+    </button>
+  );
+}
+
+function NumberField({ label, k, value, edit, step = "1", suffix }) {
+  return (
+    <div>
+      <label className="block text-[11px] font-medium text-gray-600 mb-1">{label}</label>
+      <div className="relative">
+        <input
+          type="number"
+          min="0"
+          step={step}
+          value={value(k)}
+          onChange={(e) => edit(k, e.target.value)}
+          className="w-full text-xs bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1.5 text-gray-800 font-mono focus:ring-1 focus:ring-blue-500"
+        />
+        {suffix && <span className="absolute right-2.5 top-1.5 text-[11px] text-gray-400">{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+function PacingOverview({ data }) {
+  const { overview, latest, snapshot } = data;
+  const scale = Math.max(1, snapshot.staffed_agents, overview.active_calls, overview.in_flight);
+  const queueShare = overview.queued_ready / Math.max(1, overview.queued_ready + snapshot.calls_started);
+  const gap = latest ? latest.requested - latest.approved : 0;
+  return (
+    <div className="lg:col-span-7 bg-white p-5 rounded-xl border border-surface-border shadow-xs flex flex-col justify-between">
+      <div>
+        <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+          <h2 className="text-sm font-bold text-gray-900">Pacing Overview</h2>
+          <span className="text-xs text-gray-400">{latest ? `Last round ${clock(latest.at)}` : "No round yet"}</span>
+        </div>
+        <div className="mt-4 space-y-3.5">
+          <Meter label="Capacity for the next calls" value={`${num(overview.capacity)} agents`} hint="free + wrap-ups ending soon" width={overview.capacity / scale} color="bg-emerald-500" />
+          <Meter label="Live calls" value={`${num(overview.active_calls)} calls`} hint={`of ${num(snapshot.staffed_agents)} staffed agents`} width={overview.active_calls / scale} color="bg-blue-600" />
+          <Meter label="Dialing or with the bot" value={`${num(overview.in_flight)} calls`} hint="not on an agent yet" width={overview.in_flight / scale} color="bg-sky-400" />
+          <Meter label="Borrowers ready to dial" value={num(overview.queued_ready)} hint="of the queue still to go" width={queueShare} color="bg-indigo-400" />
+        </div>
+        {latest ? (
+          <div className="mt-5 p-4 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50/70 to-indigo-50/50">
+            <div className="text-xs font-bold text-gray-800 uppercase tracking-wider mb-2">Pacer vs safety, last round</div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-white p-3 rounded-lg border border-blue-100">
+                <span className="text-[11px] text-gray-500 block">Pacer suggested</span>
+                <span className="text-xl font-mono font-bold text-blue-700">
+                  {num(latest.requested)} <span className="text-xs font-normal text-gray-500">calls</span>
+                </span>
+                <span className="text-[10px] text-gray-400 block mt-0.5">{humanize(latest.mode)} pacer</span>
+              </div>
+              <div className="bg-white p-3 rounded-lg border border-amber-200">
+                <span className="text-[11px] text-gray-500 block">Permitted by safety</span>
+                <span className={`text-xl font-mono font-bold ${gap > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                  {num(latest.approved)} <span className="text-xs font-normal text-gray-500">calls</span>
+                </span>
+                <span className="text-[10px] text-gray-400 block mt-0.5">{decision(latest.action).label}</span>
+              </div>
+            </div>
+            {gap > 0 || latest.reasons.length ? (
+              <div className="mt-3 text-xs bg-amber-100/70 border border-amber-300 text-amber-900 px-3 py-1.5 rounded-md font-medium">
+                {gap > 0 ? `${num(gap)} call${gap === 1 ? "" : "s"} held back. ` : ""}
+                {latest.reasons.map((r) => reason(r).label).join(" · ")}
+              </div>
+            ) : (
+              <div className="mt-3 text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-1.5 rounded-md font-medium">
+                Approved as requested; no limit was hit.
+              </div>
+            )}
+            {latest.reasoning && <p className="mt-2 text-[10.5px] font-mono text-gray-500 leading-relaxed">{latest.reasoning}</p>}
+          </div>
+        ) : (
+          <EmptyState icon="speed" title="No pacing decision yet" detail="Decisions appear once the campaign is running and has borrowers to dial." />
+        )}
+      </div>
+      <div className="mt-4 flex items-center gap-2 text-[11px] text-gray-500">
+        <span className="material-symbols-outlined text-[16px] text-gray-400">shield</span>
+        <span>The pacing engine suggests a dialing volume. The safety controller independently determines whether that volume is permitted.</span>
+      </div>
+    </div>
+  );
+}
+
+function Meter({ label, value, hint, width, color }) {
+  return (
+    <div>
+      <div className="flex justify-between text-xs font-medium mb-1">
+        <span className="text-gray-700">{label}</span>
+        <span className="text-gray-900 font-mono">
+          {value} <span className="text-gray-400 font-normal">({hint})</span>
+        </span>
+      </div>
+      <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden">
+        <div className={`${color} h-2.5 rounded-full transition-all`} style={{ width: `${Math.min(100, Math.max(0, width * 100))}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function SafetyMatrix({ data, value, edit }) {
+  const status = safetyStatus(data.status);
+  return (
+    <section className="bg-white rounded-xl border border-surface-border shadow-xs overflow-hidden">
+      <div className="p-5 border-b border-surface-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <h2 className="text-sm font-bold text-gray-900">Safety Controller</h2>
+            <Badge tone={status.tone} dot title={status.hint}>
+              {status.label}
+            </Badge>
+            <span className="text-xs text-gray-400">· {data.thresholds.length} rules checked every round</span>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">The safety controller can reduce or block new call initiation independently of the selected pacing mode.</p>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-gray-500">Fallback:</span>
+          <span className="px-2 py-1 bg-gray-100 rounded text-gray-700 font-mono text-[11px] font-medium">Forced progressive</span>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-gray-50/70 border-b border-gray-100 text-gray-500 font-semibold uppercase text-[10px] tracking-wider">
+            <tr>
+              <th className="py-3 px-5">Safety Rule</th>
+              <th className="py-3 px-4">Current</th>
+              <th className="py-3 px-4">Limit</th>
+              <th className="py-3 px-4">Status</th>
+              <th className="py-3 px-5">What it does</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 text-gray-700">
+            {data.thresholds.map((t) => {
+              const s = THRESHOLD_STATUS[t.status] ?? THRESHOLD_STATUS.no_data;
+              const key = `safety.${t.key}`;
+              const field = FIELDS[key];
+              return (
+                <tr key={t.key} className={`hover:bg-gray-50/50 transition-colors ${t.status === "over" ? "bg-rose-50/30" : ""}`}>
+                  <td className="py-3.5 px-5 font-semibold text-gray-900">{t.label}</td>
+                  <td className={`py-3.5 px-4 font-mono font-medium ${TONE[s.tone].text}`}>{formatLimit(t.key, t.current)}</td>
+                  <td className="py-3.5 px-4">
+                    {field ? (
+                      <div className="relative w-28">
+                        <input
+                          type="number"
+                          min="0"
+                          step={field.kind === "count" ? "1" : "0.1"}
+                          value={value(key)}
+                          placeholder={field.nullable ? "No limit" : undefined}
+                          onChange={(e) => edit(key, e.target.value)}
+                          className="w-full text-xs bg-gray-50 border border-gray-200 rounded-md pl-2 pr-6 py-1 text-gray-800 font-mono focus:ring-1 focus:ring-blue-500"
+                          aria-label={`${t.label} limit`}
+                        />
+                        <span className="absolute right-2 top-1 text-[11px] text-gray-400">{LIMIT_UNIT[field.kind]}</span>
+                      </div>
+                    ) : (
+                      <span className="font-mono text-gray-500">{formatLimit(t.key, t.limit)}</span>
+                    )}
+                  </td>
+                  <td className="py-3.5 px-4">
+                    <Badge tone={s.tone}>{s.label}</Badge>
+                  </td>
+                  <td className="py-3.5 px-5 text-gray-500 text-[11px] max-w-md">{t.explanation}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-5 py-2.5 border-t border-gray-100 text-[11px] text-gray-400">
+        Limits are saved with Save Configuration. They are prototype assumptions, not regulatory limits, and don&apos;t guarantee compliance.
+      </div>
+    </section>
+  );
+}
+
+function DecisionRow({ d, onInspect }) {
+  const verdict = decision(d.action);
+  const first = d.reasons[0] ? reason(d.reasons[0]) : null;
+  const held = d.approved < d.requested;
+  return (
+    <tr className={`hover:bg-gray-50/60 transition-colors cursor-pointer ${held ? "bg-amber-50/20" : ""}`} onClick={onInspect}>
+      <td className="py-3 px-5 font-mono text-gray-500 text-[11px]">{clock(d.at)}</td>
+      <td className="py-3 px-4 font-semibold text-gray-900">{d.campaign}</td>
+      <td className="py-3 px-4">
+        <Badge tone={verdict.tone}>{verdict.label}</Badge>
+      </td>
+      <td className="py-3 px-4 text-gray-600 max-w-xs truncate" title={first ? `${first.label}: ${first.detail}` : d.reasoning}>
+        {first ? first.label : "Within all limits"}
+        {first?.detail && <span className="text-gray-400"> · {first.detail}</span>}
+      </td>
+      <td className="py-3 px-4 font-mono text-gray-500">
+        {humanize(d.mode)}
+        {d.action === "FORCE_PROGRESSIVE" && <span className="text-purple-600"> → progressive</span>}
+      </td>
+      <td className={`py-3 px-4 font-mono text-center ${held ? "text-amber-800 font-semibold" : "text-gray-900"}`}>
+        {num(d.requested)} suggested / {num(d.approved)} permitted
+      </td>
+      <td className="py-3 px-5 text-right">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onInspect();
+          }}
+          className="text-blue-600 hover:text-blue-800 font-medium text-xs hover:underline"
+        >
+          Inspect
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function TabButton({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-2.5 py-1 rounded-md whitespace-nowrap ${active ? "bg-white text-gray-900 shadow-2xs font-semibold" : "text-gray-600 hover:text-gray-900"}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Legend({ color, label }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`w-3 ${color.includes("border") ? "" : "h-2.5 rounded-sm"} ${color}`} />
+      {label}
+    </span>
   );
 }

@@ -1,16 +1,58 @@
 "use client";
 
-import { useScreen } from "@/lib/useScreen";
-import { mount } from "./behavior";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useState } from "react";
+import { qs, useApi } from "@/lib/api";
+import { clock, duration, num, pct, RANGES, rangeLabel, rate, seconds } from "@/lib/format";
+import { eventStatus, eventType, providerStatus, TONE } from "@/lib/labels";
+import { useFilters } from "@/components/Filters";
+import { Badge, EmptyState, ErrorNote, Skeleton } from "@/components/ui";
+import FaultPanel from "./FaultPanel";
+import ProviderDrawer from "./ProviderDrawer";
+import RequestChart, { SERIES } from "./RequestChart";
+
+const ACCENT = { operational: "bg-po-on-tertiary-container", degraded: "bg-amber-500", outage: "bg-po-error" };
 
 export default function ProviderMonitoringScreen() {
-  const ui = useScreen(mount);
+  const params = useSearchParams();
+  const { since, setSince } = useFilters();
+  const [search, setSearch] = useState("");
+  const [chartProvider, setChartProvider] = useState(null);
+  const [open, setOpen] = useState(() => {
+    const p = params.get("provider");
+    return p === "A" || p === "B" ? p : null;
+  });
+
+  const providers = useApi(`/providers${qs({ since })}`, { interval: 4000 });
+  const events = useApi(`/events${qs({ since, limit: 8 })}`, { interval: 4000 });
+  const settings = useApi("/settings", { interval: 0 });
+
+  const data = providers.data;
+  const list = data?.providers ?? [];
+  const term = search.trim().toLowerCase();
+  const visible = term
+    ? list.filter((p) => [p.name, p.label, p.summary].some((s) => s?.toLowerCase().includes(term)))
+    : list;
+  const totals = list.reduce(
+    (acc, p) => ({
+      total: acc.total + p.requests.total,
+      accepted: acc.accepted + p.requests.accepted,
+      timeout: acc.timeout + p.requests.timeout,
+      rejected: acc.rejected + p.requests.rejected,
+    }),
+    { total: 0, accepted: 0, timeout: 0, rejected: 0 },
+  );
+
+  const refresh = () => {
+    providers.refresh();
+    events.refresh();
+  };
 
   return (
     <>
       <div className="font-body-md text-po-on-surface antialiased bg-po-surface px-6 py-6 min-h-[calc(100vh-3.5rem)]">
         <div className="flex flex-col w-full gap-5 pb-16">
-          {/* 3. PAGE HEADER & FILTER ACTION BAR */}
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-po-surface-container-lowest p-5 rounded-xl border border-po-surface-container shadow-sm">
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-2.5 flex-wrap">
@@ -20,776 +62,467 @@ export default function ProviderMonitoringScreen() {
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-po-on-tertiary-container opacity-75" />
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-po-on-tertiary-container" />
                   </span>
-                  <span>Simulation Environment • SIP Mesh v2</span>
+                  <span>Simulation environment</span>
                 </div>
               </div>
-              <p className="font-body-md text-[13px] text-po-on-surface-variant">Monitor mock provider availability, request outcomes, synthetic latency, and webhook delivery resilience.</p>
+              <p className="font-body-md text-[13px] text-po-on-surface-variant">
+                Monitor mock provider availability, request outcomes, simulated timing, and event delivery.
+              </p>
             </div>
-            {/* Controls Row */}
             <div className="flex items-center flex-wrap gap-2.5">
               <div className="relative">
-                <select className="h-8 pl-3 pr-8 bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[13px] rounded-lg border-0 appearance-none cursor-pointer focus:ring-1 focus:ring-po-secondary transition-colors py-0">
-                  <option>All Campaigns (3)</option>
-                  <option>Inbound Inquiries Core</option>
-                  <option>Lead Recovery Dialing</option>
-                  <option>Tier 1 Outbound Survey</option>
+                <select
+                  value={since}
+                  onChange={(e) => setSince(Number(e.target.value))}
+                  className="h-8 pl-3 pr-8 bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[13px] rounded-lg border-0 appearance-none cursor-pointer focus:ring-1 focus:ring-po-secondary transition-colors py-0"
+                  title="Time range"
+                >
+                  {RANGES.map((r) => (
+                    <option key={r.value} value={r.value}>
+                      {r.label}
+                    </option>
+                  ))}
                 </select>
-                {" "}
-                <span className="material-symbols-outlined text-[16px] text-po-on-surface-variant absolute right-2 top-2 pointer-events-none">expand_more</span>
-              </div>
-              <div className="relative">
-                <select className="h-8 pl-3 pr-8 bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[13px] rounded-lg border-0 appearance-none cursor-pointer focus:ring-1 focus:ring-po-secondary transition-colors py-0">
-                  <option>Last 24 hours</option>
-                  <option>Last 6 hours</option>
-                  <option>Last 1 hour</option>
-                  <option>Last 7 days</option>
-                </select>
-                {" "}
                 <span className="material-symbols-outlined text-[16px] text-po-on-surface-variant absolute right-2 top-2 pointer-events-none">expand_more</span>
               </div>
               <div className="relative flex items-center">
                 <span className="material-symbols-outlined text-[16px] text-po-outline absolute left-2.5 pointer-events-none">search</span>
-                <input className="h-8 pl-8 pr-3 bg-po-surface-container-low text-po-primary placeholder-po-outline font-body-sm text-[13px] rounded-lg border-0 focus:ring-1 focus:ring-po-secondary transition-all w-48 xl:w-56 py-0" id="provider-search-input" placeholder="Search provider or endpoint..." type="text" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="h-8 pl-8 pr-3 bg-po-surface-container-low text-po-primary placeholder-po-outline font-body-sm text-[13px] rounded-lg border-0 focus:ring-1 focus:ring-po-secondary transition-all w-48 xl:w-56 py-0"
+                  placeholder="Search providers…"
+                  type="text"
+                />
               </div>
-              <button className="w-8 h-8 rounded-lg bg-po-surface-container-low text-po-on-surface-variant hover:text-po-primary hover:bg-po-surface-container flex items-center justify-center transition-colors" id="btn-refresh-telemetry" onClick={(e) => ui(e).handleTelemetryRefresh()} title="Refresh Telemetry">
-                <span className="material-symbols-outlined text-[18px]" id="refresh-icon">refresh</span>
+              <button
+                type="button"
+                onClick={refresh}
+                title="Refresh"
+                className="w-8 h-8 rounded-lg bg-po-surface-container-low text-po-on-surface-variant hover:text-po-primary hover:bg-po-surface-container flex items-center justify-center transition-colors"
+              >
+                <span className={`material-symbols-outlined text-[18px] ${providers.loading ? "animate-spin" : ""}`}>refresh</span>
               </button>
-              <button className="h-8 px-3.5 rounded-lg bg-po-primary hover:bg-po-primary-container text-po-on-primary font-body-sm text-[13px] font-medium flex items-center gap-1.5 transition-colors shadow-sm" onClick={(e) => ui(e).openDrawer('gateway-b')}>
-                <span className="material-symbols-outlined text-[16px]">tune</span>
-                <span>Configure Mock Latency</span>
-              </button>
             </div>
           </div>
-          {/* 4. FOUR SUMMARY KPI CARDS ROW */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* KPI 1 */}
-            <div className="bg-po-surface-container-lowest p-4 rounded-xl border border-po-surface-container shadow-sm flex flex-col justify-between">
-              <div className="flex items-center justify-between">
-                <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold tracking-wider">CONFIGURED PROVIDERS</span>
-                <span className="px-2 py-0.5 rounded bg-po-surface-container-high text-po-secondary font-label-mono-xs text-[11px] font-semibold">Active Mesh</span>
-              </div>
-              <div className="my-2 flex items-baseline gap-1.5">
-                <span className="font-display-kpi text-[32px] leading-tight text-po-primary font-bold">2</span>
-                <span className="font-label-mono-sm text-[12px] text-po-on-surface-variant font-medium">Gateways</span>
-              </div>
-              <div className="pt-2 border-t border-po-surface-container-low flex items-center justify-between text-po-on-surface-variant font-body-sm text-[12px]">
-                <span>
-                  Mock SIP Gateway A{" "}
-                  &amp;
-                  {" "}B
-                </span>
-                <span className="material-symbols-outlined text-[16px] text-po-secondary">hub</span>
-              </div>
+
+          <ErrorNote error={providers.error} />
+
+          {!data ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-32 rounded-xl" />
+              ))}
             </div>
-            {/* KPI 2 */}
-            <div className="bg-po-surface-container-lowest p-4 rounded-xl border border-po-surface-container shadow-sm flex flex-col justify-between">
-              <div className="flex items-center justify-between">
-                <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold tracking-wider">SUCCESSFUL REQUESTS</span>
-                <span className="px-2 py-0.5 rounded bg-po-tertiary-fixed text-po-on-tertiary-fixed font-label-mono-xs text-[11px] font-semibold">+18% vol</span>
-              </div>
-              <div className="my-2 flex items-baseline gap-2">
-                <span className="font-display-kpi text-[32px] leading-tight text-po-primary font-bold">1,284</span>
-                <span className="font-label-mono-sm text-[12px] text-po-on-tertiary-container font-semibold">94.1%</span>
-              </div>
-              <div className="pt-2 border-t border-po-surface-container-low flex items-center justify-between text-po-on-surface-variant font-body-sm text-[12px]">
-                <span>SIP 200 OK completions</span>
-                <span className="material-symbols-outlined text-[16px] text-po-on-tertiary-container">check_circle</span>
-              </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <Kpi label="Configured providers" badge="Mock" value={num(list.length)} unit="providers" note={list.map((p) => p.label).join(" & ")} icon="hub" />
+              <Kpi
+                label="Successful requests"
+                badge={rangeLabel(since)}
+                value={num(totals.accepted)}
+                unit={pct(rate(totals.accepted, totals.total))}
+                unitClass="text-po-on-tertiary-container font-semibold"
+                note={`of ${num(totals.total)} call requests`}
+                icon="check_circle"
+                iconClass="text-po-on-tertiary-container"
+              />
+              <Kpi
+                label="Timeouts"
+                badge="Reconciled by lookup"
+                value={num(totals.timeout)}
+                unit={`${pct(rate(totals.timeout, totals.total))} rate`}
+                note="Outcome unknown until checked by token"
+                icon="hourglass_empty"
+              />
+              <Kpi
+                label="Provider errors"
+                badge="Rejected"
+                value={num(totals.rejected)}
+                unit={`${pct(rate(totals.rejected, totals.total))} rate`}
+                unitClass="text-po-error font-medium"
+                note="Provider said no; safe to retry"
+                icon="shield"
+                iconClass="text-po-error"
+              />
             </div>
-            {/* KPI 3 */}
-            <div className="bg-po-surface-container-lowest p-4 rounded-xl border border-po-surface-container shadow-sm flex flex-col justify-between">
-              <div className="flex items-center justify-between">
-                <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold tracking-wider">TIMEOUTS (SIP 408)</span>
-                <span className="px-2 py-0.5 rounded bg-po-surface-container text-po-on-secondary-fixed-variant font-label-mono-xs text-[11px] font-semibold">Reconciled</span>
-              </div>
-              <div className="my-2 flex items-baseline gap-2">
-                <span className="font-display-kpi text-[32px] leading-tight text-po-primary font-bold">68</span>
-                <span className="font-label-mono-sm text-[12px] text-po-on-surface-variant font-medium">5.0% rate</span>
-              </div>
-              <div className="pt-2 border-t border-po-surface-container-low flex items-center justify-between text-po-on-surface-variant font-body-sm text-[12px]">
-                <span>
-                  Safely polled{" "}
-                  &amp;
-                  {" "}deduplicated
-                </span>
-                <span className="material-symbols-outlined text-[16px] text-po-secondary">hourglass_empty</span>
-              </div>
-            </div>
-            {/* KPI 4 */}
-            <div className="bg-po-surface-container-lowest p-4 rounded-xl border border-po-surface-container shadow-sm flex flex-col justify-between">
-              <div className="flex items-center justify-between">
-                <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold tracking-wider">PROVIDER ERRORS</span>
-                <span className="px-2 py-0.5 rounded bg-po-surface-container text-po-primary font-label-mono-xs text-[11px] font-semibold">Circuit Safe</span>
-              </div>
-              <div className="my-2 flex items-baseline gap-2">
-                <span className="font-display-kpi text-[32px] leading-tight text-po-primary font-bold">12</span>
-                <span className="font-label-mono-sm text-[12px] text-po-error font-medium">0.9% 503/504</span>
-              </div>
-              <div className="pt-2 border-t border-po-surface-container-low flex items-center justify-between text-po-on-surface-variant font-body-sm text-[12px]">
-                <span>Zero unhandled exceptions</span>
-                <span className="material-symbols-outlined text-[16px] text-po-error">shield</span>
-              </div>
-            </div>
+          )}
+
+          <div className="px-4 py-2.5 rounded-xl bg-po-surface-container-low border border-po-surface-container flex items-center gap-2 text-po-on-surface-variant font-body-sm text-[12px]">
+            <span className="material-symbols-outlined text-[16px] text-po-secondary shrink-0">info</span>
+            <span>
+              Both providers are mocks inside the backend. Timings are simulated, not network latency, and no real telecom connection is involved.
+            </span>
           </div>
-          {/* SIMULATION DISCLAIMER SUB-BAR */}
-          <div className="px-4 py-2.5 rounded-xl bg-po-surface-container-low border border-po-surface-container flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-po-on-surface-variant font-body-sm text-[12px]">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-[16px] text-po-secondary shrink-0">info</span>
-              <span>Frontend Simulation Data — No live carrier network attached. Mock data calibrated against synthetic RFC-3261 handshakes.</span>
+
+          {data && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {visible.length === 0 ? (
+                <div className="lg:col-span-2 bg-po-surface-container-lowest rounded-xl border border-po-surface-container">
+                  <EmptyState icon="search_off" title="No provider matches that search" />
+                </div>
+              ) : (
+                visible.map((p) => <ProviderCard key={p.name} p={p} now={data.now} onOpen={() => setOpen(p.name)} />)
+              )}
             </div>
-            <span className="font-label-mono-xs text-[11px] uppercase text-po-outline shrink-0">ENGINE: SIP-SIM V2.8 (ACTIVE)</span>
-          </div>
-          {/* 5. PROVIDER COMPARISON CARDS (2 COLUMNS) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {/* PROVIDER A (FAST & RELIABLE) */}
-            <div className="bg-po-surface-container-lowest rounded-xl p-5 border border-po-surface-container shadow-sm flex flex-col justify-between relative overflow-hidden">
-              <div className="absolute top-0 left-0 right-0 h-1 bg-po-on-tertiary-container" />
-              <div>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-headline-md text-[18px] text-po-primary font-bold">Mock SIP Gateway A</span>
-                      <span className="font-label-mono-xs text-[11px] px-2 py-0.5 rounded bg-po-surface-container text-po-on-surface-variant font-semibold">PRI-EAST-01</span>
-                    </div>
-                    <p className="font-body-sm text-[12px] text-po-on-surface-variant">
-                      Primary Tier-1 Voice Gateway • Fast{" "}
-                      &amp;
-                      {" "}Predictable
-                    </p>
-                  </div>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-po-tertiary-fixed text-po-on-tertiary-fixed font-label-mono-xs text-[11px] font-semibold shrink-0">
-                    <span className="w-1.5 h-1.5 rounded-full bg-po-on-tertiary-container" />
-                    Operational
-                  </span>
-                </div>
-                {/* Latency & Metric Banner */}
-                <div className="grid grid-cols-3 gap-3 my-4 p-3.5 rounded-lg bg-po-surface-container-low border border-po-surface-container">
-                  <div className="flex flex-col">
-                    <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">AVG LATENCY</span>
-                    <div className="flex items-baseline gap-1.5 mt-1">
-                      <span className="font-headline-lg text-[22px] text-po-primary font-bold">24ms</span>
-                      <span className="font-label-mono-xs text-[11px] text-po-on-tertiary-container font-semibold">Low</span>
-                    </div>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">SUCCESS RATE</span>
-                    <div className="flex items-baseline gap-1.5 mt-1">
-                      <span className="font-headline-lg text-[22px] text-po-primary font-bold">98.4%</span>
-                      <span className="font-label-mono-xs text-[11px] text-po-outline">1,120 req</span>
-                    </div>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">CIRCUIT HEALTH</span>
-                    <div className="flex items-baseline gap-1.5 mt-1">
-                      <span className="font-headline-lg text-[22px] text-po-on-tertiary-container font-bold">100%</span>
-                      <span className="font-label-mono-xs text-[11px] text-po-outline">0 trips</span>
-                    </div>
-                  </div>
-                </div>
-                {/* Telemetry Details */}
-                <div className="flex flex-col gap-1.5 font-body-sm text-[12.5px]">
-                  <div className="flex items-center justify-between py-1">
-                    <span className="text-po-on-surface-variant">Request Behavior:</span>
-                    <span className="font-medium text-po-primary text-right">Fast responses and predictable outcomes across SIP handshakes</span>
-                  </div>
-                  <div className="flex items-center justify-between py-1">
-                    <span className="text-po-on-surface-variant">Event Delivery:</span>
-                    <span className="font-medium text-po-primary text-right">Normal simulated delivery • Zero dropped webhooks</span>
-                  </div>
-                  <div className="flex flex-col gap-1.5 pt-2">
-                    <div className="flex justify-between font-label-mono-xs text-[11px] text-po-on-surface-variant">
-                      <span>Volume Split: 1,120 Successful</span>
-                      <span>18 Timeouts • 0 Errors</span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-po-surface-container overflow-hidden flex">
-                      <div className="h-full bg-po-on-tertiary-container rounded-full" style={{ width: "98.4%" }} />
-                      <div className="h-full bg-po-secondary-fixed-dim" style={{ width: "1.6%" }} />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              {/* Action Footer */}
-              <div className="flex items-center justify-between pt-4 mt-4 border-t border-po-surface-container">
-                <div className="flex items-center gap-1.5 text-po-on-surface-variant font-label-mono-xs text-[11px]">
-                  <span className="material-symbols-outlined text-[16px] text-po-on-tertiary-container">dns</span>
-                  <span>sip-gw-a.mock.mesh:5060</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button className="h-8 px-3 rounded-lg bg-po-surface-container hover:bg-po-surface-container-high text-po-primary font-body-sm text-[12px] font-medium transition-colors" onClick={(e) => ui(e).openDrawer('gateway-a')}>Inspect SIP Trunks</button>
-                  <button className="h-8 px-3.5 rounded-lg bg-po-primary hover:bg-po-primary-container text-po-on-primary font-body-sm text-[12px] font-medium transition-colors shadow-sm" onClick={(e) => ui(e).openDrawer('gateway-a')}>View Details</button>
-                </div>
-              </div>
-            </div>
-            {/* PROVIDER B (SLOW & UNRELIABLE) */}
-            <div className="bg-po-surface-container-lowest rounded-xl p-5 border border-po-surface-container shadow-sm flex flex-col justify-between relative overflow-hidden">
-              <div className="absolute top-0 left-0 right-0 h-1 bg-po-secondary" />
-              <div>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-headline-md text-[18px] text-po-primary font-bold">Mock SIP Gateway B</span>
-                      <span className="font-label-mono-xs text-[11px] px-2 py-0.5 rounded bg-po-surface-container text-po-on-surface-variant font-semibold">SEC-WEST-02</span>
-                    </div>
-                    <p className="font-body-sm text-[12px] text-po-on-surface-variant">Secondary Fallback Gateway • Fault Injection Target</p>
-                  </div>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-po-surface-container-highest text-po-secondary font-label-mono-xs text-[11px] font-semibold shrink-0">
-                    <span className="w-1.5 h-1.5 rounded-full bg-po-secondary" />
-                    Degraded / Monitoring
-                  </span>
-                </div>
-                {/* Latency & Metric Banner */}
-                <div className="grid grid-cols-3 gap-3 my-4 p-3.5 rounded-lg bg-po-surface-container-low border border-po-surface-container">
-                  <div className="flex flex-col">
-                    <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">AVG LATENCY</span>
-                    <div className="flex items-baseline gap-1.5 mt-1">
-                      <span className="font-headline-lg text-[22px] text-po-primary font-bold">318ms</span>
-                      <span className="font-label-mono-xs text-[11px] text-po-secondary font-semibold">Elevated</span>
-                    </div>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">SUCCESS RATE</span>
-                    <div className="flex items-baseline gap-1.5 mt-1">
-                      <span className="font-headline-lg text-[22px] text-po-primary font-bold">72.8%</span>
-                      <span className="font-label-mono-xs text-[11px] text-po-outline">226 total</span>
-                    </div>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">EVENT ANOMALY</span>
-                    <div className="flex items-baseline gap-1.5 mt-1">
-                      <span className="font-headline-lg text-[22px] text-po-secondary font-bold">22</span>
-                      <span className="font-label-mono-xs text-[11px] text-po-outline">Dups/Order</span>
-                    </div>
-                  </div>
-                </div>
-                {/* Telemetry Details */}
-                <div className="flex flex-col gap-1.5 font-body-sm text-[12.5px]">
-                  <div className="flex items-center justify-between py-1">
-                    <span className="text-po-on-surface-variant">Request Behavior:</span>
-                    <span className="font-medium text-po-primary text-right">Delays, timeouts, and transient SIP 504 failures under load</span>
-                  </div>
-                  <div className="flex items-center justify-between py-1">
-                    <span className="text-po-on-surface-variant">Event Delivery:</span>
-                    <span className="font-medium text-po-primary text-right">
-                      Duplicate (14){" "}
-                      &amp;
-                      {" "}out-of-order (8) event delivery observed
-                    </span>
-                  </div>
-                  <div className="flex flex-col gap-1.5 pt-2">
-                    <div className="flex justify-between font-label-mono-xs text-[11px] text-po-on-surface-variant">
-                      <span>Volume Split: 164 Successful</span>
-                      <span>50 Timeouts • 12 SIP Errors</span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-po-surface-container overflow-hidden flex">
-                      <div className="h-full bg-po-on-tertiary-container rounded-full" style={{ width: "72.8%" }} />
-                      <div className="h-full bg-po-secondary-container" style={{ width: "21.9%" }} />
-                      <div className="h-full bg-po-error" style={{ width: "5.3%" }} />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              {/* Action Footer */}
-              <div className="flex items-center justify-between pt-4 mt-4 border-t border-po-surface-container">
-                <div className="flex items-center gap-1.5 text-po-on-surface-variant font-label-mono-xs text-[11px]">
-                  <span className="material-symbols-outlined text-[16px] text-po-secondary">wifi_channel</span>
-                  <span>sip-gw-b.mock.mesh:5060</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button className="h-8 px-3 rounded-lg bg-po-surface-container hover:bg-po-surface-container-high text-po-primary font-body-sm text-[12px] font-medium transition-colors flex items-center gap-1.5" id="btn-reconnect" onClick={(e) => ui(e).triggerReconnect()}>
-                    <span className="material-symbols-outlined text-[14px]">sync</span>
-                    <span>Trigger Reconnect</span>
-                  </button>
-                  <button className="h-8 px-3.5 rounded-lg bg-po-primary hover:bg-po-primary-container text-po-on-primary font-body-sm text-[12px] font-medium transition-colors shadow-sm" onClick={(e) => ui(e).openDrawer('gateway-b')}>View Details</button>
-                </div>
-              </div>
-            </div>
-          </div>
-          {/* 6. REQUEST PERFORMANCE CHART & FAULT SIMULATION LAB */}
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-            {/* COLUMN 1: CHART (7 COLS) */}
             <div className="lg:col-span-7 bg-po-surface-container-lowest rounded-xl p-5 border border-po-surface-container shadow-sm flex flex-col justify-between">
               <div>
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                   <div className="flex flex-col">
                     <h2 className="font-headline-md text-[18px] text-po-primary font-bold">Request Performance</h2>
-                    <span className="font-body-sm text-[12px] text-po-on-surface-variant">Throughput and error distribution aggregated by hourly intervals</span>
+                    <span className="font-body-sm text-[12px] text-po-on-surface-variant">
+                      Call requests by outcome, {data ? `${duration(data.series.bucket_s)} buckets` : "per bucket"}
+                    </span>
                   </div>
-                  {/* Time Range Filter Pills */}
                   <div className="flex items-center gap-1 bg-po-surface-container-low p-1 rounded-lg border border-po-surface-container">
-                    <button className="px-2.5 py-0.5 rounded bg-po-surface-container-lowest text-po-primary font-label-mono-xs text-[11px] font-semibold shadow-sm">24h</button>
-                    <button className="px-2.5 py-0.5 rounded text-po-on-surface-variant hover:text-po-primary font-label-mono-xs text-[11px]">6h</button>
-                    <button className="px-2.5 py-0.5 rounded text-po-on-surface-variant hover:text-po-primary font-label-mono-xs text-[11px]">7d</button>
+                    {[null, ...list.map((p) => p.name)].map((name) => (
+                      <button
+                        key={name ?? "all"}
+                        type="button"
+                        onClick={() => setChartProvider(name)}
+                        className={`px-2.5 py-0.5 rounded font-label-mono-xs text-[11px] ${
+                          chartProvider === name ? "bg-po-surface-container-lowest text-po-primary font-semibold shadow-sm" : "text-po-on-surface-variant hover:text-po-primary"
+                        }`}
+                      >
+                        {name ? `Provider ${name}` : "All"}
+                      </button>
+                    ))}
                   </div>
                 </div>
-                {/* Chart Legend */}
-                <div className="flex items-center flex-wrap gap-4 mb-4 pb-2 border-b border-po-surface-container-low">
-                  <div className="flex items-center gap-1.5 font-body-sm text-[12px] text-po-on-surface-variant">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-po-on-tertiary-container" />
-                    <span>Successful (SIP 200 OK)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 font-body-sm text-[12px] text-po-on-surface-variant">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-po-secondary" />
-                    <span>Timed-out (SIP 408)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 font-body-sm text-[12px] text-po-on-surface-variant">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-po-error" />
-                    <span>Failed (SIP 503/504)</span>
-                  </div>
+                <div className="flex items-center flex-wrap gap-4 mb-3 pb-2 border-b border-po-surface-container-low">
+                  {SERIES.map((s) => (
+                    <div key={s.key} className="flex items-center gap-1.5 font-body-sm text-[12px] text-po-on-surface-variant">
+                      <span className={`w-2.5 h-2.5 rounded-sm ${s.swatch}`} />
+                      <span>{s.label}</span>
+                    </div>
+                  ))}
                 </div>
-                {/* Hourly Stacked Bar Chart */}
-                <div className="w-full h-56 flex flex-col justify-end pt-2">
-                  <svg className="w-full h-44 overflow-visible" preserveAspectRatio="none" viewBox="0 0 600 160">
-                    {/* Grid Lines */}
-                    <line stroke="#eaedff" strokeDasharray="2,2" strokeWidth="1" x1="0" x2="600" y1="10" y2="10" />
-                    <line stroke="#eaedff" strokeDasharray="2,2" strokeWidth="1" x1="0" x2="600" y1="55" y2="55" />
-                    <line stroke="#eaedff" strokeDasharray="2,2" strokeWidth="1" x1="0" x2="600" y1="100" y2="100" />
-                    <line stroke="#dae2fd" strokeWidth="1" x1="0" x2="600" y1="145" y2="145" />
-                    {/* 00:00 */}
-                    <g className="transition-opacity hover:opacity-80 cursor-pointer">
-                      <rect fill="#28a094" height="80" rx="3" width="30" x="35" y="65" />
-                      <rect fill="#4e45d5" height="6" rx="1" width="30" x="35" y="58" />
-                      <rect fill="#ba1a1a" height="3" rx="1" width="30" x="35" y="54" />
-                    </g>
-                    {/* 04:00 */}
-                    <g className="transition-opacity hover:opacity-80 cursor-pointer">
-                      <rect fill="#28a094" height="55" rx="3" width="30" x="135" y="90" />
-                      <rect fill="#4e45d5" height="3" rx="1" width="30" x="135" y="86" />
-                    </g>
-                    {/* 08:00 */}
-                    <g className="transition-opacity hover:opacity-80 cursor-pointer">
-                      <rect fill="#28a094" height="115" rx="3" width="30" x="235" y="30" />
-                      <rect fill="#4e45d5" height="5" rx="1" width="30" x="235" y="24" />
-                      <rect fill="#ba1a1a" height="1" rx="1" width="30" x="235" y="22" />
-                    </g>
-                    {/* 12:00 */}
-                    <g className="transition-opacity hover:opacity-80 cursor-pointer">
-                      <rect fill="#28a094" height="125" rx="3" width="30" x="335" y="20" />
-                      <rect fill="#4e45d5" height="9" rx="1" width="30" x="335" y="10" />
-                      <rect fill="#ba1a1a" height="4" rx="1" width="30" x="335" y="5" />
-                    </g>
-                    {/* 16:00 */}
-                    <g className="transition-opacity hover:opacity-80 cursor-pointer">
-                      <rect fill="#28a094" height="103" rx="3" width="30" x="435" y="42" />
-                      <rect fill="#4e45d5" height="7" rx="1" width="30" x="435" y="34" />
-                      <rect fill="#ba1a1a" height="1" rx="1" width="30" x="435" y="32" />
-                    </g>
-                    {/* 20:00 (Now) */}
-                    <g className="transition-opacity hover:opacity-80 cursor-pointer">
-                      <rect fill="#28a094" height="93" rx="3" width="30" x="535" y="52" />
-                      <rect fill="#4e45d5" height="5" rx="1" width="30" x="535" y="46" />
-                      <rect fill="#ba1a1a" height="2" rx="1" width="30" x="535" y="43" />
-                    </g>
-                  </svg>
-                  {/* X Axis Labels */}
-                  <div className="flex justify-between px-3 pt-2 font-label-mono-xs text-[11px] text-po-on-surface-variant border-t border-po-surface-container">
-                    <span>00:00</span>
-                    <span>04:00</span>
-                    <span>08:00</span>
-                    <span>12:00</span>
-                    <span>16:00</span>
-                    <span className="font-semibold text-po-primary">20:00 (Now)</span>
-                  </div>
-                </div>
+                {data ? <RequestChart series={data.series} provider={chartProvider} /> : <Skeleton className="h-48" />}
               </div>
-              {/* Footer note */}
               <div className="mt-4 pt-3 border-t border-po-surface-container flex flex-col sm:flex-row sm:items-center justify-between gap-1 font-label-mono-xs text-[11px] text-po-outline">
-                <span>Illustrative Simulation Data • Carrier benchmarks simulated via SIP-Sim v2 engine</span>
-                <span className="text-po-primary font-semibold">Throughput: 98 req/min</span>
+                <span>Simulation output from the live console · {rangeLabel(since)}</span>
+                {data && <span className="text-po-primary font-semibold">{num(totals.total)} requests</span>}
               </div>
             </div>
-            {/* COLUMN 2: FAULT SIMULATION LAB (5 COLS) */}
-            <div className="lg:col-span-5 bg-po-surface-container-lowest rounded-xl p-5 border border-po-surface-container shadow-sm flex flex-col justify-between">
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="material-symbols-outlined text-[20px] text-po-secondary">science</span>
-                    <h2 className="font-headline-md text-[18px] text-po-primary font-bold">Fault Simulation Lab</h2>
-                  </div>
-                  <span className="px-2 py-0.5 rounded bg-po-surface-container text-po-secondary font-label-mono-xs text-[11px] font-semibold">Safe Sandbox</span>
-                </div>
-                <p className="font-body-sm text-[12.5px] text-po-on-surface-variant">Exercise SmartDialX&#39;s recovery orchestrator, deduplication pipeline, and pacing safety throttles using deterministic mock faults.</p>
-                {/* Form Controls */}
-                <div className="flex flex-col gap-3 mt-1">
-                  {/* Target Gateway Toggle */}
-                  <div className="flex flex-col gap-1.5">
-                    <label className="font-label-ui text-[11px] text-po-primary uppercase font-semibold">TARGET GATEWAY</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button className="px-3 py-1.5 rounded-lg text-po-on-surface-variant bg-po-surface-container-low font-body-sm text-[13px] font-medium hover:bg-po-surface-container transition-colors" id="sim-btn-gwa" onClick={(e) => ui(e).selectSimProvider('gw-a')} type="button">Mock Gateway A</button>
-                      <button className="px-3 py-1.5 rounded-lg text-po-primary bg-po-surface-container-high font-body-sm text-[13px] font-semibold transition-colors" id="sim-btn-gwb" onClick={(e) => ui(e).selectSimProvider('gw-b')} type="button">Mock Gateway B</button>
-                    </div>
-                  </div>
-                  {/* Simulated Behavior */}
-                  <div className="flex flex-col gap-1.5">
-                    <label className="font-label-ui text-[11px] text-po-primary uppercase font-semibold">SIMULATED BEHAVIOR / FAULT</label>
-                    <div className="relative">
-                      <select className="w-full h-8 pl-3 pr-8 bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[13px] rounded-lg border-0 appearance-none focus:ring-1 focus:ring-po-secondary transition-colors cursor-pointer py-0" id="sim-scenario-select" onChange={(e) => ui(e).updateSimPreview()}>
-                        <option value="timeout">Request timeouts (SIP 408)</option>
-                        <option value="latency">Increased latency (+350ms)</option>
-                        <option value="outage">Temporary provider outage (SIP 503)</option>
-                        <option value="duplicates">Duplicate webhook events (x2)</option>
-                        <option value="reorder">Out-of-order event sequence</option>
-                        <option value="normal">Normal operation (Baseline)</option>
-                      </select>
-                      {" "}
-                      <span className="material-symbols-outlined text-[16px] text-po-on-surface-variant absolute right-2.5 top-2 pointer-events-none">expand_more</span>
-                    </div>
-                  </div>
-                  {/* Duration Pills */}
-                  <div className="flex flex-col gap-1.5">
-                    <label className="font-label-ui text-[11px] text-po-primary uppercase font-semibold">TEST WINDOW DURATION</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <button className="py-1 rounded-lg bg-po-surface-container-high text-po-primary font-label-mono-xs text-[11px] font-semibold transition-colors" id="dur-1m" onClick={(e) => ui(e).selectSimDuration('1m')} type="button">1 minute</button>
-                      <button className="py-1 rounded-lg bg-po-surface-container-low text-po-on-surface-variant font-label-mono-xs text-[11px] font-medium hover:bg-po-surface-container transition-colors" id="dur-5m" onClick={(e) => ui(e).selectSimDuration('5m')} type="button">5 minutes</button>
-                      <button className="py-1 rounded-lg bg-po-surface-container-low text-po-on-surface-variant font-label-mono-xs text-[11px] font-medium hover:bg-po-surface-container transition-colors" id="dur-15m" onClick={(e) => ui(e).selectSimDuration('15m')} type="button">15 minutes</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              {/* Dynamic Scenario Box & Run Button */}
-              <div className="flex flex-col gap-3 mt-4">
-                <div className="p-3 rounded-lg bg-po-surface-container-low border-l-4 border-l-po-secondary flex flex-col gap-1 transition-all" id="sim-result-box">
-                  <div className="flex items-center justify-between font-label-mono-xs text-[11px]">
-                    <span className="font-semibold text-po-primary" id="sim-preview-title">Scenario: SIP 408 on Gateway B</span>
-                    <span className="text-po-secondary font-semibold" id="sim-preview-status">Ready to Inject</span>
-                  </div>
-                  <p className="font-body-sm text-[12px] text-po-on-surface-variant leading-relaxed" id="sim-preview-desc">Pacing controller throttles batch rate to 1:1 Progressive and initiates automated webhook deduplication without carrier dropped calls.</p>
-                </div>
-                <button className="w-full h-9 rounded-lg bg-po-primary hover:bg-po-primary-container text-po-on-primary font-body-sm text-[13px] font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-sm" id="btn-run-sim" onClick={(e) => ui(e).runSimulation()}>
-                  <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                  <span>Run Simulation</span>
-                </button>
-              </div>
-            </div>
+            {data ? (
+              <FaultPanel providers={list} labels={settings.data?.faults} now={data.now} onChanged={refresh} />
+            ) : (
+              <Skeleton className="lg:col-span-5 h-96 rounded-xl" />
+            )}
           </div>
-          {/* 7. PROVIDER METRICS COMPARATIVE TABLE */}
+
           <div className="bg-po-surface-container-lowest rounded-xl border border-po-surface-container shadow-sm overflow-hidden">
-            <div className="p-5 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-po-surface-container-low">
-              <div>
-                <h2 className="font-headline-md text-[18px] text-po-primary font-bold">Provider Metrics</h2>
-                <p className="font-body-sm text-[12px] text-po-on-surface-variant">Comparative reliability telemetry across configured mock providers</p>
+            <div className="p-5 pb-3 border-b border-po-surface-container-low">
+              <h2 className="font-headline-md text-[18px] text-po-primary font-bold">Provider Metrics</h2>
+              <p className="font-body-sm text-[12px] text-po-on-surface-variant">Side-by-side reliability of the two mock providers, {rangeLabel(since).toLowerCase()}</p>
+            </div>
+            {!data ? (
+              <div className="p-5 space-y-2">
+                <Skeleton className="h-10" />
+                <Skeleton className="h-10" />
               </div>
-              <span className="font-label-mono-xs text-[11px] px-2.5 py-1 rounded bg-po-surface-container text-po-on-surface-variant font-semibold self-start sm:self-auto">Synthetic SLA Target: 99.0%</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-po-surface-container-low text-po-on-surface-variant font-label-ui text-[11px] uppercase tracking-wider border-b border-po-surface-container">
-                    <th className="py-2.5 px-5">Provider</th>
-                    <th className="py-2.5 px-3">Status</th>
-                    <th className="py-2.5 px-3 text-right">Avg Latency</th>
-                    <th className="py-2.5 px-3 text-right">Successful Requests</th>
-                    <th className="py-2.5 px-3 text-right">Timeouts</th>
-                    <th className="py-2.5 px-3 text-right">Errors</th>
-                    <th className="py-2.5 px-3 text-right">Event Issues</th>
-                    <th className="py-2.5 px-5 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-po-surface-container font-body-sm text-[13px]">
-                  {/* Row 1: Gateway A */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-3 px-5">
-                      <div className="flex items-center gap-3">
-                        <div className="w-7 h-7 rounded-lg bg-po-surface-container-high flex items-center justify-center text-po-primary font-bold text-[11px]">A</div>
-                        <div className="flex flex-col">
-                          <span className="font-semibold text-po-primary">Mock SIP Gateway A</span>
-                          <span className="font-label-mono-xs text-[11px] text-po-outline">PRI • sip-gw-a.internal</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-po-tertiary-fixed text-po-on-tertiary-fixed font-label-mono-xs text-[11px] font-semibold">
-                        <span className="w-1.5 h-1.5 rounded-full bg-po-on-tertiary-container" />
-                        Operational
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 text-right font-label-mono-sm text-[12px] font-semibold text-po-primary">24ms</td>
-                    <td className="py-3 px-3 text-right">
-                      <span className="font-label-mono-sm text-[12px] font-medium text-po-primary">1,120</span>
-                      {" "}
-                      <span className="font-label-mono-xs text-[11px] text-po-on-tertiary-container ml-1">(98.4%)</span>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <span className="font-label-mono-sm text-[12px] font-medium text-po-primary">18</span>
-                      {" "}
-                      <span className="font-label-mono-xs text-[11px] text-po-outline ml-1">(1.6%)</span>
-                    </td>
-                    <td className="py-3 px-3 text-right font-label-mono-sm text-[12px] text-po-on-surface-variant">
-                      0{" "}
-                      <span className="text-po-outline text-[10px]">(0.0%)</span>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <span className="px-2 py-0.5 rounded bg-po-surface-container text-po-on-surface-variant font-label-mono-xs text-[11px]">0 anomalies</span>
-                    </td>
-                    <td className="py-3 px-5 text-right">
-                      <button className="h-7 px-3 rounded-lg bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[12px] font-medium transition-colors" onClick={(e) => ui(e).openDrawer('gateway-a')}>Inspect</button>
-                    </td>
-                  </tr>
-                  {/* Row 2: Gateway B */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-3 px-5">
-                      <div className="flex items-center gap-3">
-                        <div className="w-7 h-7 rounded-lg bg-po-surface-container-high flex items-center justify-center text-po-primary font-bold text-[11px]">B</div>
-                        <div className="flex flex-col">
-                          <span className="font-semibold text-po-primary">Mock SIP Gateway B</span>
-                          <span className="font-label-mono-xs text-[11px] text-po-outline">SEC • sip-gw-b.internal</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-po-surface-container-highest text-po-secondary font-label-mono-xs text-[11px] font-semibold">
-                        <span className="w-1.5 h-1.5 rounded-full bg-po-secondary" />
-                        Degraded
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 text-right font-label-mono-sm text-[12px] font-semibold text-po-secondary">318ms</td>
-                    <td className="py-3 px-3 text-right">
-                      <span className="font-label-mono-sm text-[12px] font-medium text-po-primary">164</span>
-                      {" "}
-                      <span className="font-label-mono-xs text-[11px] text-po-outline ml-1">(72.8%)</span>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <span className="font-label-mono-sm text-[12px] font-medium text-po-secondary">50</span>
-                      {" "}
-                      <span className="font-label-mono-xs text-[11px] text-po-secondary ml-1">(22.2%)</span>
-                    </td>
-                    <td className="py-3 px-3 text-right font-label-mono-sm text-[12px] text-po-error font-medium">
-                      12{" "}
-                      <span className="text-po-outline text-[10px]">(5.3%)</span>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <span className="px-2 py-0.5 rounded bg-po-surface-container-highest text-po-secondary font-label-mono-xs text-[11px] font-semibold">22 (dups/order)</span>
-                    </td>
-                    <td className="py-3 px-5 text-right">
-                      <button className="h-7 px-3 rounded-lg bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[12px] font-medium transition-colors" onClick={(e) => ui(e).openDrawer('gateway-b')}>Inspect</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div className="p-3.5 bg-po-surface-container-low border-t border-po-surface-container flex items-center justify-between text-po-on-surface-variant font-label-mono-xs text-[11px]">
-              <span>All metrics reflect mock telemetry generated for testing failover resilience.</span>
-              <span className="text-po-outline">Heartbeat Frequency: 2000ms</span>
+            ) : visible.length === 0 ? (
+              <EmptyState icon="search_off" title="No provider matches that search" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-po-surface-container-low text-po-on-surface-variant font-label-ui text-[11px] uppercase tracking-wider border-b border-po-surface-container">
+                      <th className="py-2.5 px-5">Provider</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3 text-right">Time to ring</th>
+                      <th className="py-2.5 px-3 text-right">Accepted</th>
+                      <th className="py-2.5 px-3 text-right">Timeouts</th>
+                      <th className="py-2.5 px-3 text-right">Errors</th>
+                      <th className="py-2.5 px-3 text-right">Event issues</th>
+                      <th className="py-2.5 px-5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-po-surface-container font-body-sm text-[13px]">
+                    {visible.map((p) => (
+                      <MetricsRow key={p.name} p={p} onOpen={() => setOpen(p.name)} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="p-3.5 bg-po-surface-container-low border-t border-po-surface-container text-po-on-surface-variant font-label-mono-xs text-[11px]">
+              Time to ring is simulated by the mock (request sent to RINGING event), not measured network latency.
             </div>
           </div>
-          {/* 8. RECENT PROVIDER EVENTS & RECOVERY STREAM */}
+
           <div className="bg-po-surface-container-lowest rounded-xl border border-po-surface-container shadow-sm overflow-hidden">
             <div className="p-5 pb-3 flex items-center justify-between border-b border-po-surface-container-low">
-              <div className="flex items-center gap-2">
-                <h2 className="font-headline-md text-[18px] text-po-primary font-bold">Recent Provider Events</h2>
-                <span className="w-2 h-2 rounded-full bg-po-secondary" />
-              </div>
-              <a className="font-body-sm text-[12px] font-semibold text-po-secondary hover:text-po-secondary-container flex items-center gap-1 transition-colors" data-path="event-logs-and-recovery" href="#">
-                <span>
-                  View All Event Logs{" "}
-                  &amp;
-                  {" "}Recovery
-                </span>
+              <h2 className="font-headline-md text-[18px] text-po-primary font-bold">Recent Provider Events</h2>
+              <Link href="/event-logs" className="font-body-sm text-[12px] font-semibold text-po-secondary hover:text-po-secondary-container flex items-center gap-1 transition-colors">
+                <span>View all in Event Logs &amp; Recovery</span>
                 <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
-              </a>
+              </Link>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-po-surface-container-low text-po-on-surface-variant font-label-ui text-[11px] uppercase tracking-wider border-b border-po-surface-container">
-                    <th className="py-2.5 px-5">Time</th>
-                    <th className="py-2.5 px-3">Provider</th>
-                    <th className="py-2.5 px-3">Event</th>
-                    <th className="py-2.5 px-3">Outcome</th>
-                    <th className="py-2.5 px-3">Recovery Status</th>
-                    <th className="py-2.5 px-5">Details</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-po-surface-container font-body-sm text-[13px]">
-                  {/* Event 1 */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-2.5 px-5 font-label-mono-xs text-[11px] text-po-outline">14:38:12.410</td>
-                    <td className="py-2.5 px-3 font-semibold text-po-primary">Gateway A</td>
-                    <td className="py-2.5 px-3">Call request accepted</td>
-                    <td className="py-2.5 px-3">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-po-tertiary-fixed text-po-on-tertiary-fixed font-label-mono-xs text-[11px] font-semibold">SIP 200 OK</span>
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className="font-label-mono-xs text-[11px] text-po-on-tertiary-container font-semibold">Normal</span>
-                    </td>
-                    <td className="py-2.5 px-5 text-po-on-surface-variant font-body-sm text-[12px]">Agent handshake completed; channel #88 ready</td>
-                  </tr>
-                  {/* Event 2 */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-2.5 px-5 font-label-mono-xs text-[11px] text-po-outline">14:35:40.892</td>
-                    <td className="py-2.5 px-3 font-semibold text-po-primary">Gateway B</td>
-                    <td className="py-2.5 px-3">Request timed out</td>
-                    <td className="py-2.5 px-3">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-po-surface-container-highest text-po-secondary font-label-mono-xs text-[11px] font-semibold">SIP 408 Timeout</span>
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className="font-label-mono-xs text-[11px] text-po-secondary font-semibold">Auto-Reconciled</span>
-                    </td>
-                    <td className="py-2.5 px-5 text-po-on-surface-variant font-body-sm text-[12px]">Reconciled via secondary poll; duplicate call initiation prevented</td>
-                  </tr>
-                  {/* Event 3 */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-2.5 px-5 font-label-mono-xs text-[11px] text-po-outline">14:33:19.102</td>
-                    <td className="py-2.5 px-3 font-semibold text-po-primary">Gateway B</td>
-                    <td className="py-2.5 px-3">Duplicate event received</td>
-                    <td className="py-2.5 px-3">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-po-surface-container text-po-on-surface-variant font-label-mono-xs text-[11px] font-medium">Ignored</span>
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className="font-label-mono-xs text-[11px] text-po-primary font-semibold">Deduplicated</span>
-                    </td>
-                    <td className="py-2.5 px-5 text-po-on-surface-variant font-body-sm text-[12px]">
-                      Hash matched event{" "}
-                      <span className="font-label-mono-xs text-[11px] text-po-primary font-medium">#EV-9902</span>
-                      ; discarded safely
-                    </td>
-                  </tr>
-                  {/* Event 4 */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-2.5 px-5 font-label-mono-xs text-[11px] text-po-outline">14:30:05.614</td>
-                    <td className="py-2.5 px-3 font-semibold text-po-primary">Gateway B</td>
-                    <td className="py-2.5 px-3">Out-of-order event</td>
-                    <td className="py-2.5 px-3">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-po-surface-container-high text-po-primary font-label-mono-xs text-[11px] font-medium">Recorded</span>
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className="font-label-mono-xs text-[11px] text-po-secondary font-semibold">Realignment</span>
-                    </td>
-                    <td className="py-2.5 px-5 text-po-on-surface-variant font-body-sm text-[12px]">Event re-sequenced before state transition dispatch</td>
-                  </tr>
-                  {/* Event 5 */}
-                  <tr className="hover:bg-po-surface-container/60 transition-colors">
-                    <td className="py-2.5 px-5 font-label-mono-xs text-[11px] text-po-outline">14:26:44.200</td>
-                    <td className="py-2.5 px-3 font-semibold text-po-primary">Gateway A</td>
-                    <td className="py-2.5 px-3">Provider lookup completed</td>
-                    <td className="py-2.5 px-3">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-po-tertiary-fixed text-po-on-tertiary-fixed font-label-mono-xs text-[11px] font-semibold">Verified</span>
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className="font-label-mono-xs text-[11px] text-po-on-tertiary-container font-semibold">Operational</span>
-                    </td>
-                    <td className="py-2.5 px-5 text-po-on-surface-variant font-body-sm text-[12px]">DNS SRV health ping resolved in 18ms • 0 packet jitter</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            {/* Compliance Notice Footer */}
-            <div className="p-3.5 bg-po-surface-container-low border-t border-po-surface-container flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-po-on-surface-variant font-body-sm text-[12px]">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-[16px] text-po-on-tertiary-container shrink-0">verified_user</span>
-                <span>Privacy-Compliant Mode: No customer phone numbers or live SIP trunks involved in mock telemetry.</span>
+            <ErrorNote error={events.error} className="m-4" />
+            {!events.data ? (
+              <div className="p-5 space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} className="h-8" />
+                ))}
               </div>
-              <span className="font-label-mono-xs text-[11px] text-po-outline">Audit Hash: #0x92b-8a4d</span>
+            ) : events.data.events.length === 0 ? (
+              <EmptyState icon="inbox" title="No provider events in this range" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-po-surface-container-low text-po-on-surface-variant font-label-ui text-[11px] uppercase tracking-wider border-b border-po-surface-container">
+                      <th className="py-2.5 px-5">Time</th>
+                      <th className="py-2.5 px-3">Provider</th>
+                      <th className="py-2.5 px-3">Event</th>
+                      <th className="py-2.5 px-3">Outcome</th>
+                      <th className="py-2.5 px-3">Handling</th>
+                      <th className="py-2.5 px-5">Call</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-po-surface-container font-body-sm text-[13px]">
+                    {events.data.events.map((e) => (
+                      <EventRow key={e.event_id} e={e} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="p-3.5 bg-po-surface-container-low border-t border-po-surface-container flex items-center gap-2 text-po-on-surface-variant font-body-sm text-[12px]">
+              <span className="material-symbols-outlined text-[16px] text-po-on-tertiary-container shrink-0">verified_user</span>
+              <span>Borrowers and phone numbers are synthetic; no customer data is involved.</span>
             </div>
           </div>
         </div>
       </div>
-      <div className="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-40 hidden transition-opacity duration-200" id="provider-drawer-backdrop" onClick={(e) => ui(e).closeDrawer()} />
-      <aside className="fixed right-0 top-0 h-full w-full sm:w-[440px] bg-white shadow-2xl z-50 transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col justify-between overflow-y-auto" id="provider-drawer">
-        {/* Header */}
-        <div className="p-5 bg-po-surface-container-low border-b border-po-surface-container flex items-start justify-between">
-          <div className="flex flex-col gap-1">
+
+      <ProviderDrawer name={open} since={since} onClose={() => setOpen(null)} />
+    </>
+  );
+}
+
+function Kpi({ label, badge, value, unit, unitClass = "text-po-on-surface-variant font-medium", note, icon, iconClass = "text-po-secondary" }) {
+  return (
+    <div className="bg-po-surface-container-lowest p-4 rounded-xl border border-po-surface-container shadow-sm flex flex-col justify-between">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold tracking-wider">{label}</span>
+        <span className="px-2 py-0.5 rounded bg-po-surface-container text-po-on-secondary-fixed-variant font-label-mono-xs text-[11px] font-semibold truncate">{badge}</span>
+      </div>
+      <div className="my-2 flex items-baseline gap-2">
+        <span className="font-display-kpi text-[32px] leading-tight text-po-primary font-bold">{value}</span>
+        <span className={`font-label-mono-sm text-[12px] ${unitClass}`}>{unit}</span>
+      </div>
+      <div className="pt-2 border-t border-po-surface-container-low flex items-center justify-between gap-2 text-po-on-surface-variant font-body-sm text-[12px]">
+        <span className="truncate">{note}</span>
+        <span className={`material-symbols-outlined text-[16px] ${iconClass}`}>{icon}</span>
+      </div>
+    </div>
+  );
+}
+
+function StatusPill({ status }) {
+  const s = providerStatus(status);
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border font-label-mono-xs text-[11px] font-semibold shrink-0 ${TONE[s.tone].badge}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${TONE[s.tone].dot}`} />
+      {s.label}
+    </span>
+  );
+}
+
+function ProviderCard({ p, now, onOpen }) {
+  const { requests: r, profile } = p;
+  const share = (n) => `${r.total ? (n / r.total) * 100 : 0}%`;
+  const issues = p.duplicates + p.out_of_order;
+  return (
+    <div className="bg-po-surface-container-lowest rounded-xl p-5 border border-po-surface-container shadow-sm flex flex-col justify-between relative overflow-hidden">
+      <div className={`absolute top-0 left-0 right-0 h-1 ${ACCENT[p.status] ?? ACCENT.operational}`} />
+      <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col gap-0.5">
             <div className="flex items-center gap-2">
-              <span className="font-label-mono-xs text-[11px] px-2 py-0.5 rounded bg-po-surface-container text-po-primary uppercase font-bold" id="drawer-provider-id">GW-MOCK-A</span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-po-tertiary-fixed text-po-on-tertiary-fixed font-label-mono-xs text-[11px] font-semibold" id="drawer-provider-badge">Operational</span>
+              <span className="font-headline-md text-[18px] text-po-primary font-bold">{p.label}</span>
+              <span className="font-label-mono-xs text-[11px] px-2 py-0.5 rounded bg-po-surface-container text-po-on-surface-variant font-semibold">{p.name}</span>
             </div>
-            <h2 className="font-headline-lg text-[20px] text-po-primary font-bold" id="drawer-provider-name">Mock SIP Gateway A</h2>
-            <span className="font-body-sm text-[12px] text-po-on-surface-variant">
-              Detailed telemetry{" "}
-              &amp;
-              {" "}fault resilience profile
+            <p className="font-body-sm text-[12px] text-po-on-surface-variant">{p.summary}</p>
+          </div>
+          <StatusPill status={p.status} />
+        </div>
+
+        {p.fault && (
+          <div className="mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[12px] text-amber-900 flex items-center gap-2">
+            <span className="material-symbols-outlined text-[16px]">science</span>
+            <span>
+              <span className="font-semibold">{p.fault.label}</span> injected
+              {p.fault.until ? ` · ends in ${duration(Math.max(0, p.fault.until - now))}` : " · until cleared"}
             </span>
           </div>
-          <button className="w-8 h-8 rounded-lg hover:bg-po-surface-container flex items-center justify-center text-po-on-surface-variant hover:text-po-primary transition-colors" onClick={(e) => ui(e).closeDrawer()} title="Close drawer">
-            <span className="material-symbols-outlined text-[20px]">close</span>
+        )}
+
+        <div className="grid grid-cols-3 gap-3 my-4 p-3.5 rounded-lg bg-po-surface-container-low border border-po-surface-container">
+          <Metric label="Time to ring" value={seconds(p.avg_ring_s)} note={`answer ${seconds(p.avg_answer_s)}`} />
+          <Metric label="Success rate" value={pct(p.success_rate)} note={`${num(r.total)} req`} />
+          <Metric label="Event issues" value={num(issues)} note="dups / order" accent={issues ? "text-po-secondary" : "text-po-primary"} />
+        </div>
+
+        <div className="flex flex-col gap-1.5 font-body-sm text-[12.5px]">
+          <Detail
+            label="Request behaviour"
+            value={`${pct(profile.reject_rate)} rejected · ${pct(profile.timeout_rate)} time out · ${pct(profile.drop_rate)} drop`}
+          />
+          <Detail
+            label="Event delivery"
+            value={
+              profile.duplicate_rate || profile.jitter_s
+                ? `${pct(profile.duplicate_rate)} duplicated · jitter up to ${profile.jitter_s}s`
+                : "On time, no duplicates"
+            }
+          />
+          <Detail label="Observed" value={`${num(p.duplicates)} duplicates · ${num(p.out_of_order)} out of order · ${num(p.live_calls)} live calls`} />
+          <div className="flex flex-col gap-1.5 pt-2">
+            <div className="flex justify-between font-label-mono-xs text-[11px] text-po-on-surface-variant">
+              <span>{num(r.accepted)} accepted</span>
+              <span>
+                {num(r.timeout)} timeouts · {num(r.rejected)} errors
+              </span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-po-surface-container overflow-hidden flex">
+              <div className="h-full bg-po-on-tertiary-container" style={{ width: share(r.accepted) }} />
+              <div className="h-full bg-po-secondary" style={{ width: share(r.timeout) }} />
+              <div className="h-full bg-po-error" style={{ width: share(r.rejected) }} />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-3 pt-4 mt-4 border-t border-po-surface-container">
+        <div className="flex items-center gap-1.5 text-po-on-surface-variant font-label-mono-xs text-[11px] min-w-0">
+          <span className="material-symbols-outlined text-[16px] text-po-secondary">campaign</span>
+          <span className="truncate">{p.campaigns.length ? p.campaigns.map((c) => c.name).join(", ") : "No campaigns use it"}</span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Link
+            href={`/event-logs${qs({ q: `${p.name}-` })}`}
+            className="h-8 px-3 rounded-lg bg-po-surface-container hover:bg-po-surface-container-high text-po-primary font-body-sm text-[12px] font-medium transition-colors flex items-center"
+          >
+            Events
+          </Link>
+          <button
+            type="button"
+            onClick={onOpen}
+            className="h-8 px-3.5 rounded-lg bg-po-primary hover:bg-po-primary-container text-po-on-primary font-body-sm text-[12px] font-medium transition-colors shadow-sm"
+          >
+            View Details
           </button>
         </div>
-        {/* Body */}
-        <div className="p-5 flex flex-col gap-4 flex-1">
-          {/* Key Telemetry Summary */}
-          <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-po-surface-container-low border border-po-surface-container">
-            <div className="flex flex-col">
-              <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">REGION</span>
-              <span className="font-label-mono-sm text-[12px] text-po-primary font-semibold mt-1" id="drawer-region">us-east-1 (N. Virginia)</span>
-            </div>
-            <div className="flex flex-col">
-              <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">TRANSPORT</span>
-              <span className="font-label-mono-sm text-[12px] text-po-primary font-semibold mt-1">TLS / SRTP (Mock)</span>
-            </div>
-            <div className="flex flex-col mt-1">
-              <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">ACTIVE CHANNELS</span>
-              <span className="font-label-mono-sm text-[12px] text-po-primary font-semibold mt-1" id="drawer-channels">64 / 250 Allocated</span>
-            </div>
-            <div className="flex flex-col mt-1">
-              <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">SRV CLUSTER</span>
-              <span className="font-label-mono-sm text-[12px] text-po-secondary font-semibold mt-1" id="drawer-cluster">cluster-sip-node-04</span>
-            </div>
-          </div>
-          {/* Ambiguous Timeout Safeguard Banner */}
-          <div className="p-3.5 rounded-xl bg-po-surface-container-highest border border-po-surface-container text-po-on-secondary-fixed flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5 font-semibold font-body-sm text-[12.5px] text-po-secondary">
-              <span className="material-symbols-outlined text-[18px]">verified_user</span>
-              <span>Ambiguous Timeout Safeguard</span>
-            </div>
-            <p className="font-body-sm text-[12px] text-po-on-surface leading-relaxed">When a call request times out (SIP 408), SmartDialX reconciles the call state with the mock provider via asynchronous lookup before initiating any retries — preventing double-dialing.</p>
-          </div>
-          {/* Failure Handling Matrix */}
-          <div className="flex flex-col gap-2">
-            <h3 className="font-label-ui text-[11px] text-po-primary uppercase font-bold tracking-wider">SUPPORTED FAILURE HANDLING</h3>
-            <div className="flex flex-col gap-2 font-body-sm text-[12px]">
-              <div className="p-3 rounded-lg bg-po-surface-container-low border border-po-surface-container flex items-start gap-2.5">
-                <span className="material-symbols-outlined text-[18px] text-po-on-tertiary-container mt-0.5 shrink-0">check_circle</span>
-                <div className="flex flex-col">
-                  <span className="font-semibold text-po-primary">SIP 503 Circuit Trip Protection</span>
-                  <span className="text-po-on-surface-variant text-[11.5px] mt-0.5">Automatically switches to backup routes when threshold exceeds 5% failures within 60s.</span>
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-po-surface-container-low border border-po-surface-container flex items-start gap-2.5">
-                <span className="material-symbols-outlined text-[18px] text-po-on-tertiary-container mt-0.5 shrink-0">check_circle</span>
-                <div className="flex flex-col">
-                  <span className="font-semibold text-po-primary">Webhook Idempotency Keying</span>
-                  <span className="text-po-on-surface-variant text-[11.5px] mt-0.5">SHA-256 event fingerprinting drops redundant webhooks within a 30-minute deduplication window.</span>
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-po-surface-container-low border border-po-surface-container flex items-start gap-2.5">
-                <span className="material-symbols-outlined text-[18px] text-po-on-tertiary-container mt-0.5 shrink-0">check_circle</span>
-                <div className="flex flex-col">
-                  <span className="font-semibold text-po-primary">Adaptive Pacing Downshift</span>
-                  <span className="text-po-on-surface-variant text-[11.5px] mt-0.5">Dynamically scales concurrency down to 1:1 progressive if provider latency passes 200ms.</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          {/* Simulated Heartbeat Log */}
-          <div className="flex flex-col gap-1.5">
-            <h3 className="font-label-ui text-[11px] text-po-primary uppercase font-bold tracking-wider">SIMULATED HEARTBEAT LOG</h3>
-            <div className="space-y-1.5 font-label-mono-xs text-[11px] text-po-on-surface-variant bg-po-surface-container-low p-3.5 rounded-xl border border-po-surface-container">
-              <div className="flex items-center justify-between">
-                <span className="text-po-outline">14:38:00</span>
-                <span className="text-po-on-tertiary-container font-medium">OPTIONS sip-health-ping (200 OK)</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-po-outline">14:36:00</span>
-                <span className="text-po-on-tertiary-container font-medium">OPTIONS sip-health-ping (200 OK)</span>
-              </div>
-              <div className="flex items-center justify-between" id="drawer-recent-anomaly">
-                <span className="text-po-outline">14:34:00</span>
-                <span className="text-po-on-tertiary-container font-medium">OPTIONS sip-health-ping (200 OK)</span>
-              </div>
-            </div>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, note, accent = "text-po-primary" }) {
+  return (
+    <div className="flex flex-col">
+      <span className="font-label-ui text-[11px] text-po-on-surface-variant uppercase font-semibold">{label}</span>
+      <div className="flex items-baseline gap-1.5 mt-1 flex-wrap">
+        <span className={`font-headline-lg text-[22px] font-bold ${accent}`}>{value}</span>
+        <span className="font-label-mono-xs text-[11px] text-po-outline">{note}</span>
+      </div>
+    </div>
+  );
+}
+
+function Detail({ label, value }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1">
+      <span className="text-po-on-surface-variant shrink-0">{label}:</span>
+      <span className="font-medium text-po-primary text-right">{value}</span>
+    </div>
+  );
+}
+
+function MetricsRow({ p, onOpen }) {
+  const r = p.requests;
+  const share = (n) => pct(rate(n, r.total));
+  const issues = p.duplicates + p.out_of_order;
+  return (
+    <tr className="hover:bg-po-surface-container/60 transition-colors">
+      <td className="py-3 px-5">
+        <div className="flex items-center gap-3">
+          <div className="w-7 h-7 rounded-lg bg-po-surface-container-high flex items-center justify-center text-po-primary font-bold text-[11px]">{p.name}</div>
+          <div className="flex flex-col">
+            <span className="font-semibold text-po-primary">{p.label}</span>
+            <span className="font-label-mono-xs text-[11px] text-po-outline">{p.summary}</span>
           </div>
         </div>
-        {/* Footer Actions */}
-        <div className="p-5 bg-po-surface-container-low border-t border-po-surface-container flex items-center justify-between gap-3">
-          <button className="h-8 px-3 rounded-lg bg-po-surface-container hover:bg-po-surface-container-high text-po-primary font-body-sm text-[12px] font-medium transition-colors flex items-center gap-1.5" id="btn-ping" onClick={(e) => ui(e).triggerPingTest()}>
-            <span className="material-symbols-outlined text-[16px]">network_ping</span>
-            <span>Simulate Ping</span>
-          </button>
-          <div className="flex items-center gap-2">
-            <button className="h-8 px-3 rounded-lg bg-po-secondary text-po-on-secondary font-body-sm text-[12px] font-medium hover:bg-po-secondary-container transition-colors" id="btn-reroute" onClick={(e) => ui(e).rerouteFallback()}>Force Fallback</button>
-            <button className="h-8 px-3.5 rounded-lg bg-po-primary hover:bg-po-primary-container text-po-on-primary font-body-sm text-[12px] font-medium transition-colors shadow-sm" onClick={(e) => ui(e).closeDrawer()}>Done</button>
-          </div>
-        </div>
-      </aside>
-    </>
+      </td>
+      <td className="py-3 px-3">
+        <StatusPill status={p.status} />
+      </td>
+      <td className="py-3 px-3 text-right font-label-mono-sm text-[12px] font-semibold text-po-primary">{seconds(p.avg_ring_s)}</td>
+      <td className="py-3 px-3 text-right">
+        <span className="font-label-mono-sm text-[12px] font-medium text-po-primary">{num(r.accepted)}</span>
+        <span className="font-label-mono-xs text-[11px] text-po-on-tertiary-container ml-1">({share(r.accepted)})</span>
+      </td>
+      <td className="py-3 px-3 text-right">
+        <span className={`font-label-mono-sm text-[12px] font-medium ${r.timeout ? "text-po-secondary" : "text-po-primary"}`}>{num(r.timeout)}</span>
+        <span className="font-label-mono-xs text-[11px] text-po-outline ml-1">({share(r.timeout)})</span>
+      </td>
+      <td className="py-3 px-3 text-right">
+        <span className={`font-label-mono-sm text-[12px] font-medium ${r.rejected ? "text-po-error" : "text-po-on-surface-variant"}`}>{num(r.rejected)}</span>
+        <span className="text-po-outline text-[10px] ml-1">({share(r.rejected)})</span>
+      </td>
+      <td className="py-3 px-3 text-right">
+        <span
+          className={`px-2 py-0.5 rounded font-label-mono-xs text-[11px] ${issues ? "bg-po-surface-container-highest text-po-secondary font-semibold" : "bg-po-surface-container text-po-on-surface-variant"}`}
+          title={`${p.duplicates} duplicate deliveries, ${p.out_of_order} out-of-order or late events`}
+        >
+          {num(issues)} (dups/order)
+        </span>
+      </td>
+      <td className="py-3 px-5 text-right">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="h-7 px-3 rounded-lg bg-po-surface-container-low hover:bg-po-surface-container text-po-primary font-body-sm text-[12px] font-medium transition-colors"
+        >
+          Inspect
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function EventRow({ e }) {
+  const s = eventStatus(e.status);
+  let handling = e.note || "—";
+  if (e.duplicate) handling = `Deduplicated, delivered ${e.deliveries}× · ${handling}`;
+  if (e.reconciled) handling = `From a recovery lookup · ${handling}`;
+  return (
+    <tr className="hover:bg-po-surface-container/60 transition-colors">
+      <td className="py-2.5 px-5 font-label-mono-xs text-[11px] text-po-outline">{clock(e.received_at)}</td>
+      <td className="py-2.5 px-3 font-semibold text-po-primary">Provider {e.provider}</td>
+      <td className="py-2.5 px-3">{eventType(e.type)}</td>
+      <td className="py-2.5 px-3">
+        <Badge tone={s.tone} title={s.hint}>
+          {s.label}
+        </Badge>
+      </td>
+      <td className="py-2.5 px-3 text-po-on-surface-variant font-body-sm text-[12px] max-w-xs truncate" title={handling}>
+        {handling}
+      </td>
+      <td className="py-2.5 px-5 font-label-mono-xs text-[11px]">
+        {e.call_id ? (
+          <Link href={`/live-operations?call=${e.call_id}`} className="text-po-secondary hover:underline">
+            {e.call}
+          </Link>
+        ) : (
+          <span className="text-po-outline">—</span>
+        )}
+      </td>
+    </tr>
   );
 }

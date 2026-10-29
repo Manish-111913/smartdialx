@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useApi } from "@/lib/api";
+import { providerStatus, TONE } from "@/lib/labels";
+import type { Health } from "@/lib/types";
 import { isActive, navGroups, type NavItem } from "./nav";
 
 type Props = {
@@ -11,6 +14,10 @@ type Props = {
 
 export default function Sidebar({ collapsed, onToggle }: Props) {
   const pathname = usePathname();
+  const { data: health, error } = useApi<Health>("/health", { interval: 5000 });
+  const backend = error ? "unreachable" : !health ? "connecting" : health.warming_up ? "warming" : "connected";
+  const dot = { connected: "bg-emerald-500", warming: "bg-amber-400", connecting: "bg-slate-300", unreachable: "bg-rose-500" }[backend];
+  const label = { connected: "Connected", warming: "Replaying history", connecting: "Connecting…", unreachable: "Unreachable" }[backend];
 
   return (
     <aside
@@ -63,22 +70,35 @@ export default function Sidebar({ collapsed, onToggle }: Props) {
 
       <div className="p-space-sm border-t border-slate-100 bg-slate-50/70">
         {collapsed ? (
-          <div className="flex flex-col items-center justify-center py-2" title="Mock Simulation Environment Active">
-            <span className="w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-emerald-100" />
+          <div className="flex flex-col items-center justify-center py-2" title={`Backend: ${label}`}>
+            <span className={`w-3 h-3 rounded-full ring-2 ring-white ${dot}`} />
           </div>
         ) : (
           <div className="p-2 rounded-lg bg-white border border-slate-200/70 shadow-xs flex flex-col gap-1.5">
             <div className="flex items-center justify-between font-label-mono-xs text-label-mono-xs">
-              <span className="text-slate-400 uppercase font-semibold">ENV</span>
+              <span className="text-slate-400 uppercase font-semibold">Backend</span>
               <span className="inline-flex items-center gap-1.5 font-semibold text-slate-800">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                Demo / Mock
+                <span className={`w-2 h-2 rounded-full ${dot} ${backend === "connected" ? "animate-pulse" : ""}`} />
+                {label}
               </span>
             </div>
             <div className="flex items-center justify-between font-label-mono-xs text-label-mono-xs">
-              <span className="text-slate-400 uppercase font-semibold">PROVIDER</span>
-              <span className="font-medium text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">SIP-Sim v2</span>
+              <span className="text-slate-400 uppercase font-semibold">Env</span>
+              <span className="font-medium text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">Simulation</span>
             </div>
+            {health && (
+              <div className="flex items-center justify-between font-label-mono-xs text-label-mono-xs">
+                <span className="text-slate-400 uppercase font-semibold">Providers</span>
+                <span className="flex items-center gap-2">
+                  {Object.entries(health.providers).map(([name, status]) => (
+                    <span key={name} title={`Mock provider ${name}: ${providerStatus(status).label}`} className="inline-flex items-center gap-1 text-slate-700 font-semibold">
+                      <span className={`w-1.5 h-1.5 rounded-full ${TONE[providerStatus(status).tone].dot}`} />
+                      {name}
+                    </span>
+                  ))}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>

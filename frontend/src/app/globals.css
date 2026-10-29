@@ -13,6 +13,13 @@
   }
 }
 
+/* the forms plugin draws the select arrow in the right padding; screens set px-*
+   on their selects, which would put the text under the arrow. This selector is
+   more specific than a utility class, so it wins wherever it's used. */
+select:not([multiple]) {
+  padding-right: 2rem;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

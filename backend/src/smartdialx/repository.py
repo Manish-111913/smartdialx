@@ -46,6 +46,9 @@ class _NothingToReserve(Exception):
     pass
 
 
+_CAMPAIGN_EXTRAS = {"description", "audience", "hold_s", "no_agent_policy"}
+
+
 class Repository:
     def __init__(self, db: Database, clock: Clock, settings: Settings | None = None):
         self.db = db
@@ -55,16 +58,61 @@ class Repository:
     # ---- setup -----------------------------------------------------------
 
     def create_campaign(
-        self, name: str, mode: Mode, provider: str, max_attempts: int | None = None, screening: bool = False
+        self,
+        name: str,
+        mode: Mode,
+        provider: str,
+        max_attempts: int | None = None,
+        screening: bool = False,
+        status: CampaignStatus = CampaignStatus.RUNNING,
+        **extra,
     ) -> int:
+        """`extra` takes the optional columns: description, audience, hold_s, no_agent_policy."""
+        unknown = set(extra) - _CAMPAIGN_EXTRAS
+        if unknown:
+            raise ValueError(f"unknown campaign fields: {', '.join(sorted(unknown))}")
         attempts = max_attempts or self.settings.timeouts.max_attempts
+        cols = ["name", "mode", "provider", "max_attempts", "screening", "status", "created_at", "updated_at", *extra]
+        now = self.clock.now()
+        values = [name, Mode(mode).value, provider, attempts, int(screening), CampaignStatus(status).value, now, now,
+                  *extra.values()]
         with self.db.transaction() as conn:
             cur = conn.execute(
-                "INSERT INTO campaigns (name, mode, provider, max_attempts, screening, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (name, Mode(mode).value, provider, attempts, int(screening), self.clock.now()),
+                f"INSERT INTO campaigns ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", values
             )
             return cur.lastrowid
+
+    def cancel_queued(self, campaign_id: int, reason: str) -> int:
+        """Cancel every call still waiting in the queue, e.g. when a campaign is stopped."""
+        with self.db.transaction() as conn:
+            now = self.clock.now()
+            cur = conn.execute(
+                "UPDATE calls SET state = 'CANCELLED', end_reason = ?, ended_at = ?, updated_at = ?"
+                " WHERE campaign_id = ? AND state = 'QUEUED'",
+                (reason, now, now, campaign_id),
+            )
+            return cur.rowcount
+
+    def update_campaign(self, campaign_id: int, **fields) -> None:
+        """Change a campaign's configuration. Calls already placed keep what they started with."""
+        allowed = {"name", "mode", "provider", "screening", "max_attempts"} | _CAMPAIGN_EXTRAS
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unknown campaign fields: {', '.join(sorted(unknown))}")
+        if not fields:
+            return
+        if "mode" in fields:
+            fields["mode"] = Mode(fields["mode"]).value
+        if "screening" in fields:
+            fields["screening"] = int(bool(fields["screening"]))
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                f"UPDATE campaigns SET {sets}, updated_at = ? WHERE id = ?",
+                (*fields.values(), self.clock.now(), campaign_id),
+            )
+            if cur.rowcount != 1:
+                raise KeyError(f"campaign {campaign_id} not found")
 
     def get_campaign(self, campaign_id: int) -> Campaign:
         row = self.db.conn().execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
@@ -82,7 +130,10 @@ class Repository:
 
     def set_campaign_status(self, campaign_id: int, status: CampaignStatus) -> None:
         with self.db.transaction() as conn:
-            conn.execute("UPDATE campaigns SET status = ? WHERE id = ?", (status.value, campaign_id))
+            conn.execute(
+                "UPDATE campaigns SET status = ?, updated_at = ? WHERE id = ?",
+                (CampaignStatus(status).value, self.clock.now(), campaign_id),
+            )
 
     def add_agents(self, count: int, state: AgentState = A.AVAILABLE, prefix: str = "agent") -> list[int]:
         now = self.clock.now()
@@ -96,6 +147,14 @@ class Repository:
                 )
                 ids.append(cur.lastrowid)
             return ids
+
+    def add_agent(self, name: str, state: AgentState = A.AVAILABLE) -> int:
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO agents (name, state, updated_at) VALUES (?, ?, ?)",
+                (name, AgentState(state).value, self.clock.now()),
+            )
+            return cur.lastrowid
 
     def add_borrowers(self, campaign_id: int, count: int) -> list[int]:
         """Adds borrowers with fake numbers and queues a first call for each."""
@@ -448,13 +507,14 @@ class Repository:
 
     def _after_call(self, conn, call, target: CallState, reason: str, now: float) -> None:
         borrower = conn.execute(
-            "SELECT b.attempts, c.max_attempts FROM borrowers b JOIN campaigns c ON c.id = b.campaign_id"
+            "SELECT b.attempts, c.max_attempts, c.no_agent_policy FROM borrowers b"
+            " JOIN campaigns c ON c.id = b.campaign_id"
             " WHERE b.id = ?",
             (call["borrower_id"],),
         ).fetchone()
         s = self.settings.screening
         retry = reason in RETRYABLE_REASONS and target != C.ABANDONED
-        if reason == "no_agent_transfer" and s.no_agent_policy != "callback":
+        if reason == "no_agent_transfer" and (borrower["no_agent_policy"] or s.no_agent_policy) != "callback":
             retry = False
         if retry:
             if borrower["attempts"] < borrower["max_attempts"]:
@@ -523,8 +583,12 @@ class Repository:
             "UPDATE calls SET state = 'TRANSFER_PENDING', screen_result = 'willing', screen_result_at = ?,"
             "   transfer_requested_at = ?, hold_until = ?, last_event_at = ?, updated_at = ?"
             " WHERE id = ? AND state = 'SCREENING'",
-            (now, now, now + self.settings.screening.hold_s, now, now, call["id"]),
+            (now, now, now + self._hold_s(conn, call["campaign_id"]), now, now, call["id"]),
         )
+
+    def _hold_s(self, conn, campaign_id: int) -> float:
+        row = conn.execute("SELECT hold_s FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
+        return row["hold_s"] if row and row["hold_s"] else self.settings.screening.hold_s
 
     def record_screen_result(self, conn, call_id: int, result: str) -> None:
         conn.execute(
@@ -635,6 +699,8 @@ class Repository:
         hangups: list[Hangup] = []
         with self.db.transaction() as conn:
             agent = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if agent is None:
+                raise KeyError(f"agent {agent_id} not found")
             current = A(agent["state"])
             if current == target:
                 return []
@@ -646,7 +712,7 @@ class Repository:
             # detaching may have touched the agent row already; we still hold the
             # write lock, so nobody else could have
             conn.execute(
-                "UPDATE agents SET state = ?, current_call_id = NULL, wrap_up_until = NULL,"
+                "UPDATE agents SET state = ?, current_call_id = NULL, wrap_up_until = NULL, pause_requested = 0,"
                 "   version = version + 1, updated_at = ? WHERE id = ?",
                 (target.value, self.clock.now(), agent_id),
             )
@@ -673,6 +739,30 @@ class Repository:
         if call["provider_call_id"]:
             return [Hangup(call["id"], call["provider"], call["provider_call_id"])]
         return []
+
+    def request_pause(self, agent_id: int, on: bool = True) -> None:
+        """Pause an agent once they're off their current call, without cutting it short."""
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE agents SET pause_requested = ?, version = version + 1 WHERE id = ?", (int(on), agent_id)
+            )
+            if cur.rowcount != 1:
+                raise KeyError(f"agent {agent_id} not found")
+
+    def apply_requested_pauses(self) -> int:
+        """Agents with a pause request who are now free (or in wrap-up) go to PAUSED.
+
+        Runs before the dialer in each loop, so a freed agent is paused before anyone
+        can reserve them.
+        """
+        with self.db.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE agents SET state = 'PAUSED', pause_requested = 0, current_call_id = NULL,"
+                "   wrap_up_until = NULL, version = version + 1, updated_at = ?"
+                " WHERE pause_requested = 1 AND state IN ('AVAILABLE', 'WRAP_UP')",
+                (self.clock.now(),),
+            )
+            return cur.rowcount
 
     def expire_wrap_ups(self) -> int:
         with self.db.transaction() as conn:

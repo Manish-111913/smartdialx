@@ -1,8 +1,12 @@
 import type { NextConfig } from "next";
 
+// the Python backend (python -m smartdialx.main serve); override with SMARTDIALX_API
+const backend = process.env.SMARTDIALX_API ?? "http://127.0.0.1:8000";
+
 const nextConfig: NextConfig = {
-  // each screen runs its prototype script once on mount; strict mode would run it twice in dev
-  reactStrictMode: false,
+  async rewrites() {
+    return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
+  },
 };
 
 export default nextConfig;

@@ -6,10 +6,12 @@
     python -m smartdialx.main scenarios
     python -m smartdialx.main compare-screening
     python -m smartdialx.main demo
+    python -m smartdialx.main serve       # live console + HTTP API for the frontend
 """
 
 import argparse
 import logging
+import os
 import sys
 
 from . import demos
@@ -49,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("demo", help="walk through the failure cases step by step")
 
+    sv = sub.add_parser("serve", help="run the live console and the HTTP API used by the frontend")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--db", default=os.path.join("data", "console.db"), help="SQLite file for the console")
+    sv.add_argument("--keep", action="store_true", help="resume the existing database instead of starting fresh")
+    sv.add_argument("--history", type=float, default=1200, help="seconds of activity to replay on a fresh start")
+    sv.add_argument("--seed", type=int, default=7)
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(levelname)s %(name)s %(message)s")
 
@@ -61,7 +71,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "demo":
         demos.run_all()
         return 0
+    if args.command == "serve":
+        return _serve(args)
     return 1
+
+
+def _serve(args) -> int:
+    from .api import serve
+    from .console import Console
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.db)), exist_ok=True)
+    serve(Console(args.db, history_s=args.history, seed=args.seed, keep=args.keep), args.host, args.port)
+    return 0
 
 
 def _simulate(args) -> int:
